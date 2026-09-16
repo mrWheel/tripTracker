@@ -10,10 +10,97 @@ No Arduino framework, M5Unified, TinyGPS++ or other external component is requir
 
 ## Controls
 
-- **Button A (left), short press:** select **TRIP** or **TOTAL** distance.
+- **Button A (left), short press:** switch to the **TRIP** screen.
 - **Button A (left), long press (~0.8 s):** reset TRIP distance and trip average.
 - **Button B (middle):** display off. Press any button to wake it again.
-- **Button C (right):** switch the large readout between current **SPEED** and **AVG SPEED**.
+- **Button C (right):** switch to the speed screen and toggle between current **SPEED** and **AVG SPEED**.
+
+## Screens and menus
+
+### Main screen
+
+The main screen contains:
+
+- **GPS / NO GPS:** whether a valid GPS fix is available.
+- **SAT:** the number of satellites in use.
+- **Battery and charging:** the battery percentage and charging status.
+- **TRIP screen:** the large value is the current trip distance. The lower line shows current or average speed and the number of recorded points.
+
+<p align="center">
+<img src="assets/IMG_0019.jpg" alt="Main screen" width="300">
+</p>
+
+- **SPEED / AVG SPEED screen:** the large value is the current or average speed. The lower line shows the trip distance and the number of recorded points.
+
+<p align="center">
+<img src="assets/IMG_0015.jpg" alt="Main screen" width="300">
+</p>
+
+### System Menu
+
+<p align="center">
+<img src="assets/IMG_0016.jpg" alt="System Menu" width="300">
+</p>
+
+Open and close the System Menu by holding the middle button. Use the left and right buttons to move through the choices and press the middle button to select one:
+
+- **New Trip File:** closes the current export and starts a new GPX/CSV trip file. The TRIP distance and trip average are reset.
+- **Show Used and Free:** displays the used and free space on the SD card.
+- **WiFi Menu:** starts WiFi and opens the WiFi status screen and web file manager.
+- **Reset Tracker:** restarts the ESP32 application.
+- **Format SDcard:** formats the SD card and returns to the System Menu. This removes the files on the card.
+- **List Trip Files:** opens the list of saved trips.
+- **Exit:** closes the System Menu and returns to the main screen.
+
+### SD Card Info
+
+<p align="center">
+<img src="assets/IMG_0017.jpg" alt="SDcard Info" width="300">
+</p>
+
+This screen is opened through **Show Used and Free**. It shows the amount of storage currently used and the amount still free on the SD card. Press the middle button to return to the System Menu.
+
+### List Trips
+
+<p align="center">
+<img src="assets/IMG_0018.jpg" alt="List Trips" width="300">
+</p>
+
+This screen is opened through **List Trip Files**. Each row shows the local date and time at which a trip was created and its recorded distance. Use the left and right buttons to select a trip, then press the middle button to open its details. Hold the middle button to return to the System Menu.
+
+### Trip Info
+
+<p align="center">
+<img src="assets/IMG_0020.jpg" alt="Trip Info" width="300">
+</p>
+
+The Trip Info screen is opened by selecting a trip in **List Trips**. It shows:
+
+- start date and start/end time;
+- total distance;
+- trip duration;
+- average speed;
+- altitude difference.
+
+Press the middle button to return to the trip list. There is currently no separate Trip Info photo in `assets`.
+
+### WiFi Menu
+
+<p align="center">
+<img src="assets/IMG_0021.jpg" alt="WiFi Menu" width="300">
+</p>
+
+The WiFi Menu starts the browser-based file manager. When WiFi connects, the screen shows the network name, IP address and webserver status. If connection setup is not available, the device starts a captive portal at `192.168.1.4` so WiFi credentials can be configured.
+
+Open `http://tripTracker.local` after connecting, or use the displayed IP address. The file manager can:
+
+- list files on the SD card and internal LittleFS storage;
+- download files;
+- upload files;
+- delete files, except the web interface files themselves;
+- show distance and average speed for SD-card GPX trip files.
+
+Hold the middle button to close the WiFi Menu. There is currently no separate WiFi Menu photo in `assets`.
 
 ## Display
 
@@ -25,13 +112,6 @@ No Arduino framework, M5Unified, TinyGPS++ or other external component is requir
 - Charging indication.
 
 The IP5306 reports battery level in coarse 25% steps; this is a limitation of the available battery-status register, not of the UI.
-
-## Photos
-
-![TripTracker photo 1](assets/IMG_0015.jpg)
-![TripTracker photo 2](assets/IMG_0016.jpg)
-![TripTracker photo 3](assets/IMG_0017.jpg)
-![TripTracker photo 4](assets/IMG_0018.jpg)
 
 ## Battery-dependent display timeout
 
