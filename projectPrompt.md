@@ -152,10 +152,16 @@ The GPS parser accepts checksummed NMEA RMC and GGA sentences. Preserve checksum
 
 ## SD Card GPS Export
 
-Valid GPS fixes are processed for the active trip. The first valid fix is written,
-followed by another position whenever the integrated trip distance has increased
-by at least 5 meters. The export uses the same integrated distance as the TRIP
-display; it does not use an independent coordinate-distance threshold.
+Valid GPS fixes are processed for the active trip. The first valid fix is written.
+After that, a new fix is written every second unless it is skipped:
+
+- Skip when the fix reports a speed below `STATIONARY_SPEED_KMH` (0.5 km/h) and the
+  previously written fix was also below that speed.
+- Skip when the coordinate distance to the previously written fix is below
+  `MIN_MOVEMENT_METERS` (3.0 meters).
+
+These thresholds are defined in `components/sdcard/sdcard.c`. This coordinate-distance
+check is independent of the integrated trip distance used by the TRIP display.
 
 Each trip must use a new GPX file and CSV file when the trip is reset. Both files use this exact base name:
 

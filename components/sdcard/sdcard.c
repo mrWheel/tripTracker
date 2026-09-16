@@ -32,6 +32,11 @@
 //-- GPX/CSV export bug is being diagnosed. Set back to 0 once confirmed fixed.
 #define SDCARD_KEEP_SMALL_TRIP_FILES 0
 
+//-- A fix is only skipped when it is stationary noise (below this speed, same as the
+//-- previous fix) or when it barely moved since the last recorded point.
+static const float STATIONARY_SPEED_KMH = 0.5f;
+static const float MIN_MOVEMENT_METERS = 3.0f;
+
 static const char* TAG = "sdcard";
 static sdmmc_card_t* s_card;
 static int s_trip_gpx_fd = -1;
@@ -44,9 +49,7 @@ static bool s_has_last_coord;
 static double s_last_lat;
 static double s_last_lon;
 static float s_trip_distance_m;
-static float s_last_export_distance_m;
-static float s_last_log_course_deg;
-static int64_t s_last_log_time_us;
+static float s_last_written_speed_kmh;
 static uint32_t s_entry_count;
 static uint16_t s_current_trip_number;
 static bool s_waiting_for_gps_time;
@@ -187,25 +190,6 @@ static double calculate_distance_m(double lat1, double lon1, double lat2, double
 
   const double earth_radius_m = 6371000.0;
   return earth_radius_m * c;
-}
-
-//-- Calculate the minimum distance (m) between two logged points at a given speed.
-//-- Grows proportionally with speed so slow movement (walking, curves) is logged
-//-- densely while fast, straight-line driving uses fewer points.
-static float calculate_log_distance_m(float speed_kmh)
-{
-  float log_distance_m = fmaxf(5.0f, speed_kmh * 1.2f);
-  if (log_distance_m > 100.0f)
-    log_distance_m = 100.0f;
-  return log_distance_m;
-}
-
-//-- Smallest absolute angular difference between two course headings in degrees,
-//-- correctly wrapping around the 0/360 boundary (e.g. 355 -> 5 is 10 degrees).
-static float calculate_course_diff_deg(float course_a_deg, float course_b_deg)
-{
-  float diff = fmodf(course_a_deg - course_b_deg + 540.0f, 360.0f) - 180.0f;
-  return fabsf(diff);
 }
 
 static void clear_status(sdcard_status_t* status)
@@ -456,8 +440,7 @@ static void restore_last_trip_point(void)
       s_last_lat = latitude;
       s_last_lon = longitude;
       s_trip_distance_m = distance;
-      s_last_log_course_deg = course;
-      s_last_log_time_us = esp_timer_get_time();
+      s_last_written_speed_kmh = speed;
       s_has_last_coord = true;
     }
   }
@@ -577,7 +560,6 @@ static esp_err_t recover_active_trip(void)
   }
   s_entry_count = count_trip_entries(s_trip_gpx_path, true);
   restore_last_trip_point();
-  s_last_export_distance_m = s_trip_distance_m;
   s_waiting_for_gps_time = false;
   ESP_LOGI(TAG, "Resumed active trip %s with %u entries", s_trip_gpx_path, s_entry_count);
   return ESP_OK;
@@ -792,9 +774,7 @@ static esp_err_t create_trip_file(const gps_data_t* gps)
   s_last_sequence = 0;
   s_has_last_coord = false;
   s_trip_distance_m = 0.0f;
-  s_last_export_distance_m = 0.0f;
-  s_last_log_course_deg = 0.0f;
-  s_last_log_time_us = 0;
+  s_last_written_speed_kmh = 0.0f;
   s_entry_count = 0;
   s_waiting_for_gps_time = false;
   if (save_active_gpx_path() != ESP_OK)
@@ -953,35 +933,29 @@ esp_err_t sdcard_append_fix(const gps_data_t* gps, float trip_distance_m)
   if (gps->sequence == 0)
     return ESP_ERR_INVALID_ARG;
 
-  //-- Use the same integrated trip distance shown on the display.
+  //-- Write every fix unless it is stationary noise (this fix and the previous
+  //-- written fix both below STATIONARY_SPEED_KMH) or it barely moved since the
+  //-- last recorded point (below MIN_MOVEMENT_METERS).
   if (s_has_last_coord)
   {
-    float distance_since_export_m = trip_distance_m - s_last_export_distance_m;
-    float log_distance_m = calculate_log_distance_m(gps->speed_kmh);
-    float course_change_deg = calculate_course_diff_deg(gps->course_deg, s_last_log_course_deg);
-    float elapsed_s = (float)(esp_timer_get_time() - s_last_log_time_us) / 1e6f;
+    double distance_since_last_m =
+        calculate_distance_m(s_last_lat, s_last_lon, gps->latitude_deg, gps->longitude_deg);
 
-    bool distance_reached = distance_since_export_m >= log_distance_m;
-    bool course_changed = course_change_deg >= 12.0f;
-    bool time_elapsed = elapsed_s >= 10.0f;
+    bool both_stationary =
+        gps->speed_kmh < STATIONARY_SPEED_KMH && s_last_written_speed_kmh < STATIONARY_SPEED_KMH;
+    bool insufficient_movement = distance_since_last_m < MIN_MOVEMENT_METERS;
 
-    ESP_LOGD(TAG,
-             "GPS point check: speed=%.2fkm/h log-dist=%.2fm since-last=%.2fm "
-             "course-change=%.2fdeg elapsed=%.2fs",
-             gps->speed_kmh, log_distance_m, distance_since_export_m, course_change_deg, elapsed_s);
+    ESP_LOGD(TAG, "GPS point check: speed=%.2fkm/h last-speed=%.2fkm/h since-last=%.2fm",
+             gps->speed_kmh, s_last_written_speed_kmh, distance_since_last_m);
 
-    if (!distance_reached && !course_changed && !time_elapsed)
+    if (both_stationary || insufficient_movement)
     {
       s_last_sequence = gps->sequence;
       return ESP_OK;
     }
 
-    const char* reason = distance_reached ? "distance" : (course_changed ? "course" : "time");
-    ESP_LOGI(TAG,
-             "Recording GPS point (%s): sequence=%u trip-distance=%.2f since-last=%.2f "
-             "log-dist=%.2f course-change=%.2f elapsed=%.2fs",
-             reason, gps->sequence, trip_distance_m, distance_since_export_m, log_distance_m,
-             course_change_deg, elapsed_s);
+    ESP_LOGI(TAG, "Recording GPS point: sequence=%u trip-distance=%.2f since-last=%.2fm",
+             gps->sequence, trip_distance_m, distance_since_last_m);
   }
 
   if (remove_gpx_closing_tags() != ESP_OK)
@@ -1041,9 +1015,7 @@ esp_err_t sdcard_append_fix(const gps_data_t* gps, float trip_distance_m)
   s_last_lat = gps->latitude_deg;
   s_last_lon = gps->longitude_deg;
   s_has_last_coord = true;
-  s_last_export_distance_m = trip_distance_m;
-  s_last_log_course_deg = gps->course_deg;
-  s_last_log_time_us = esp_timer_get_time();
+  s_last_written_speed_kmh = gps->speed_kmh;
   ++s_entry_count;
   return ESP_OK;
 }
