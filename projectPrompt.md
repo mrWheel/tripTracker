@@ -183,6 +183,40 @@ If the SDcard has less then 20% free space remove the oldest files until there i
 
 GPX must contain valid track points, and CSV must contain the date, time, latitude, longitude, altitude, speed, course, satellite count, and cumulative distance for each exported position. Write only selected valid GPS fixes and handle file-open, write, sync, close, and card errors explicitly.
 
+### GPX File Structure
+
+The GPX file is created in `create_trip_file()` in `components/sdcard/sdcard.c` with this fixed header, then a `<trkpt>` per exported position, and is finalized after every write and on trip end:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="tripTracker" xmlns="http://www.topografix.com/GPX/1/1" xmlns:trkptx="https://triptracker.local/gpx">
+  <trk><name>GPS Trip</name><trkseg>
+    <trkpt lat="LAT" lon="LON"><ele>ALT</ele><time>DATE T TIME Z</time><extensions><speed_kmh>SPEED</speed_kmh><course_deg>COURSE</course_deg><satellites>SATS</satellites><distance_m>DIST</distance_m></extensions></trkpt>
+  </trkseg></trk>
+</gpx>
+```
+
+Per `sdcard_append_fix()`:
+
+- `lat` / `lon`: `latitude_deg` / `longitude_deg`, 7 decimal places.
+- `<ele>`: `altitude_m`, 2 decimal places.
+- `<time>`: the GPS UTC/Zulu date and time as `YYYY-MM-DDTHH:MM:SSZ`, taken directly from the GPS fix. This is standard-GPX Zulu time and must never be converted to local time. Local-time conversion (`gps_utc_to_local`) is used only for the trip file names, not for `<time>`.
+- `<speed_kmh>`, `<course_deg>`, `<satellites>`, `<distance_m>`: `speed_kmh`, `course_deg`, `satellites`, and the running `s_trip_distance_m`, in that order.
+
+Before every new `<trkpt>` is appended, `remove_gpx_closing_tags()` strips the trailing `</trkseg></trk>\n</gpx>\n`; `finalize_gpx_file()` writes those closing tags back after the point so the file is always valid GPX on disk, even if the application stops unexpectedly.
+
+### CSV File Structure
+
+The CSV file is created in `create_trip_file()` with a fixed header row, followed by one row per exported position written in `sdcard_append_fix()`:
+
+```csv
+date,time,latitude_deg,longitude_deg,altitude_m,speed_kmh,course_deg,satellites,distance_m
+YYYY-MM-DD,HH:MM:SSZ,LAT,LON,ALT,SPEED,COURSE,SATS,DIST
+```
+
+- `date` / `time`: the same GPS UTC/Zulu date and time used in the GPX `<time>` field (`HH:MM:SSZ`), not local time.
+- The remaining columns mirror the GPX fields in the same order: latitude, longitude, altitude, speed, course, satellite count, cumulative trip distance.
+
 The active GPX path is stored in NVS. On startup, the storage component resumes that exact GPX/CSV pair instead of truncating a file with the current minute's name. Existing GPX closing tags are removed before appending new positions. Trip reset must close both current export files before creating the next pair. The new files must be initialized with valid GPX/CSV structure before positions are appended, and the GPX closing tags must be written after every exported position and when the trip ends or the application shuts down where the platform allows it.
 
 The GPX file descriptor must be opened `O_RDWR`, not `O_WRONLY`. Removing the closing tags before every append reads the current tail of the file on that same descriptor to locate `</trkseg>`; a write-only descriptor fails that read with `EBADF`, silently preventing every position from being recorded. The CSV descriptor stays `O_WRONLY` since it is never read back.

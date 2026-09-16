@@ -974,23 +974,14 @@ esp_err_t sdcard_append_fix(const gps_data_t* gps, float trip_distance_m)
           : 0.0;
   s_trip_distance_m += (float)segment_distance_m;
 
-  uint16_t local_year = gps->year;
-  uint8_t local_month = gps->month;
-  uint8_t local_day = gps->day;
-  uint8_t local_hour = gps->hour;
-  uint8_t local_minute = gps->minute;
-  uint8_t local_second = gps->second;
-  int local_offset_hours = 0;
-  gps_utc_to_local(gps, &local_year, &local_month, &local_day, &local_hour, &local_minute,
-                   &local_second, &local_offset_hours);
-
+  //-- GPX/CSV position timestamps must be the raw GPS Zulu (UTC) time, not the
+  //-- local time used only for the trip file names.
   char date[16];
   char time[24];
   char gpx_point[512];
   char csv_row[256];
-  snprintf(date, sizeof(date), "%04u-%02u-%02u", local_year, local_month, local_day);
-  snprintf(time, sizeof(time), "%02u:%02u:%02u%+03d:00", local_hour, local_minute, local_second,
-           local_offset_hours);
+  snprintf(date, sizeof(date), "%04u-%02u-%02u", gps->year, gps->month, gps->day);
+  snprintf(time, sizeof(time), "%02u:%02u:%02uZ", gps->hour, gps->minute, gps->second);
   int gpx_written =
       snprintf(gpx_point, sizeof(gpx_point),
                "    <trkpt lat=\"%.7f\" "
