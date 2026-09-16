@@ -161,6 +161,10 @@ TOTAL is stored in ESP-IDF NVS. To avoid excessive flash writes, it is checkpoin
 
 ## Web GUI file manager
 
+<p align="center">
+<img src="assets/tripTracker-GUI.png" alt="GUI" width="400">
+</p>
+
 While `[WiFi Menu]` is open, a browser-based file manager is served at `http://tripTracker.local` (or the AP-mode IP during captive-portal fallback). It lets you browse, download, upload, and delete files on the SD card or on the device's internal LittleFS storage.
 
 - Files are listed newest first.
