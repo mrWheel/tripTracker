@@ -72,10 +72,21 @@ The average starts when valid GNSS speed first reaches 1.0 km/h after boot or a 
 
 TOTAL is stored in ESP-IDF NVS. To avoid excessive flash writes, it is checkpointed approximately every 1 km. Therefore, a sudden total power loss can lose up to roughly the last kilometre from TOTAL. TRIP is intentionally not persistent.
 
+## Web GUI file manager
+
+While `[WiFi Menu]` is open, a browser-based file manager is served at `http://tripTracker.local` (or the AP-mode IP during captive-portal fallback). It lets you browse, download, upload, and delete files on the SD card or on the device's internal LittleFS storage.
+
+- Files are listed newest first.
+- Trip `.gpx` files on the SD card also show their total distance and average speed, read from the matching CSV export.
+- `[Download]` and `[Delete]` are buttons; `[Refresh]` reloads the list on demand.
+- The GUI's own LittleFS files (`style.css`, `index.html`, `app.js`) can never be deleted; their `[Delete]` button is shown disabled.
+
+Wi-Fi and the webserver only run while `[WiFi Menu]` is open, to minimize power usage otherwise.
+
 ## Open in VSCode / ESP-IDF
 
-1. Unpack `m5stack-speed.zip`.
-2. In VSCode choose **File -> Open Folder...** and open the `m5stack-speed` directory.
+1. Unpack `tripTracker.zip`.
+2. In VSCode choose **File -> Open Folder...** and open the `tripTracker` directory.
 3. Make sure the Espressif ESP-IDF extension is configured for an installed ESP-IDF 5.x environment.
 4. Select target **esp32**.
 5. Connect the M5Stack Core Basic v2.7 by USB-C.
@@ -103,7 +114,9 @@ Use your actual serial device for the final command.
         ├── board/        buttons + IP5306 battery status
         ├── gps/          UART + NMEA RMC/GGA parser + 10 Hz request
         ├── lcd/          native ILI9342C SPI driver + speedometer UI
-        └── speedometer/  filtering, distance and average speed
+        ├── sdcard/       SD-card mount, GPX/CSV trip export, trip listing
+        ├── speedometer/  filtering, distance and average speed
+        └── webserver/    WiFi-menu web GUI file manager (SD card / LittleFS)
 
 ## Important design choices
 

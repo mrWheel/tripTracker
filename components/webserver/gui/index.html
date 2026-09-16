@@ -7,26 +7,38 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <h1>M5Stack Speed - File Manager</h1>
-
-  <div class="store-select">
-    <label><input type="radio" name="store" value="sd" checked> SD card</label>
-    <label><input type="radio" name="store" value="fs"> LittleFS</label>
+  <div class="titlebar">
+    <div class="titlebar-dots"><span></span><span></span><span></span></div>
+    <h1>File Manager</h1>
   </div>
 
-  <div class="upload-row">
-    <input type="file" id="uploadFile">
-    <button id="uploadButton">Upload</button>
-  </div>
+  <main class="window">
+    <div class="toolbar">
+      <div class="segmented-control" id="storeControl">
+        <label class="segment"><input type="radio" name="store" value="sd" checked><span>SD Card</span></label>
+        <label class="segment"><input type="radio" name="store" value="fs"><span>LittleFS</span></label>
+      </div>
 
-  <table id="fileTable">
-    <thead>
-      <tr><th>Name</th><th>Size</th><th></th></tr>
-    </thead>
-    <tbody id="fileTableBody"></tbody>
-  </table>
+      <div class="toolbar-spacer"></div>
 
-  <p id="statusMessage"></p>
+      <div class="upload-row">
+        <input type="file" id="uploadFile">
+        <button id="uploadButton" class="btn">Upload</button>
+        <button id="refreshButton" class="btn btn-primary">Refresh</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <table id="fileTable">
+        <thead>
+          <tr><th>Name</th><th>Size</th><th></th><th>Distance</th><th>Avg Speed</th></tr>
+        </thead>
+        <tbody id="fileTableBody"></tbody>
+      </table>
+    </div>
+
+    <p id="statusMessage"></p>
+  </main>
 
   <script src="/app.js"></script>
 </body>

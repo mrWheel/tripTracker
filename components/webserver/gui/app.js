@@ -1,6 +1,14 @@
+//-- These GUI assets are served from LittleFS and must never be deletable.
+var PROTECTED_LITTLEFS_FILES = ["style.css", "index.html", "app.js"];
+
 function currentStore()
 {
   return document.querySelector('input[name="store"]:checked').value;
+}
+
+function isProtectedFile(store, name)
+{
+  return store === "fs" && PROTECTED_LITTLEFS_FILES.indexOf(name) !== -1;
 }
 
 function setStatus(message)
@@ -15,6 +23,20 @@ function formatSize(bytes)
     return bytes + " B";
   }
   return (bytes / 1024).toFixed(1) + " kB";
+}
+
+function formatDistance(meters)
+{
+  if (meters >= 1000)
+  {
+    return (meters / 1000).toFixed(1) + " km";
+  }
+  return Math.round(meters) + " m";
+}
+
+function formatSpeed(kmh)
+{
+  return kmh.toFixed(1) + " km/h";
 }
 
 function refreshFileList()
@@ -39,21 +61,42 @@ function refreshFileList()
 
         var actionCell = document.createElement("td");
 
-        var downloadLink = document.createElement("a");
-        downloadLink.href = "/api/download?store=" + currentStore() + "&name=" + encodeURIComponent(file.name);
-        downloadLink.textContent = "Download";
-        downloadLink.style.marginRight = "1em";
-        actionCell.appendChild(downloadLink);
+        var downloadButton = document.createElement("button");
+        downloadButton.textContent = "Download";
+        downloadButton.className = "btn";
+        downloadButton.style.marginRight = "0.5em";
+        downloadButton.onclick = function ()
+        {
+          window.location = "/api/download?store=" + currentStore() + "&name=" + encodeURIComponent(file.name);
+        };
+        actionCell.appendChild(downloadButton);
 
         var deleteButton = document.createElement("button");
         deleteButton.textContent = "Delete";
-        deleteButton.onclick = function ()
+        deleteButton.className = "btn btn-danger";
+        if (isProtectedFile(currentStore(), file.name))
         {
-          deleteFile(file.name);
-        };
+          deleteButton.disabled = true;
+        }
+        else
+        {
+          deleteButton.onclick = function ()
+          {
+            deleteFile(file.name);
+          };
+        }
         actionCell.appendChild(deleteButton);
 
         row.appendChild(actionCell);
+
+        var distanceCell = document.createElement("td");
+        distanceCell.textContent = file.distance_m !== undefined ? formatDistance(file.distance_m) : "-";
+        row.appendChild(distanceCell);
+
+        var avgSpeedCell = document.createElement("td");
+        avgSpeedCell.textContent = file.avg_speed_kmh !== undefined ? formatSpeed(file.avg_speed_kmh) : "-";
+        row.appendChild(avgSpeedCell);
+
         body.appendChild(row);
       });
     })
@@ -104,6 +147,7 @@ function uploadFile()
 }
 
 document.getElementById("uploadButton").addEventListener("click", uploadFile);
+document.getElementById("refreshButton").addEventListener("click", refreshFileList);
 document.querySelectorAll('input[name="store"]').forEach(function (radio)
 {
   radio.addEventListener("change", refreshFileList);

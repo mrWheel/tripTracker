@@ -464,6 +464,22 @@ The [WiFi Menu] remains active until a LONG-press on Button B is detected; a sho
 
 Trip filenames must use the GPS date/time when a valid GPS date is available, because that is the source of truth for the trip export. If a valid GPS date is not available yet, log a warning and continue using the best available fallback timestamp without aborting the trip file creation.
 
+## Web GUI File Manager
+
+The webserver started from `[WiFi Menu]` serves a browser-based file manager from `components/webserver/gui/` (`index.html`, `style.css`, `app.js`), stored in the LittleFS `littlefs` partition and mounted through `components/webserver/webserver.c`. It is reachable at `http://tripTracker.local` (or the AP-mode IP during captive portal) while the `[WiFi Menu]` is open.
+
+The GUI uses a macOS-style light appearance (title bar with traffic-light dots, segmented control, rounded card table, San Francisco system font stack). Do not revert this to the previous plain dark theme without an explicit request.
+
+REST API, implemented in `components/webserver/webserver_api.c`:
+
+- `GET /api/files?store=<sd|fs>`: lists files in the SD card (`/sdcard`) or LittleFS (`WEBSERVER_LITTLEFS_MOUNT_POINT`) store. Response items are sorted newest-first by filename (descending string compare), not by filesystem modification time, because FAT `st_mtime` is unreliable on this device (no NTP/RTC sync from GPS). This sort order relies on the fixed zero-padded `trip-EEYYMMDD-HHmmSS` naming.
+- For SD-card `.gpx` trip files, each list item also includes `distance_m` and `avg_speed_kmh`, computed via `sdcard_get_trip_details()` against the matching CSV file. These fields are omitted when trip data isn't available (e.g. non-trip files, or on the LittleFS store).
+- `GET /api/download?store=<sd|fs>&name=<file>`: streams a file for download.
+- `POST /api/upload?store=<sd|fs>&name=<file>`: uploads a file's raw body to the store.
+- `DELETE /api/delete?store=<sd|fs>&name=<file>`: deletes a file. The LittleFS files `style.css`, `index.html`, and `app.js` can never be deleted because the GUI itself depends on them: the server rejects this with `403 Forbidden`, and the client also renders their `[Delete]` button visibly disabled (grayed out) instead of hiding it.
+
+In the file table, each row shows the file name, size, `[Download]` and `[Delete]` buttons (both real buttons, not links), and the trip's total distance and average speed when available. A `[Refresh]` button reloads the list on demand; the store toggle (SD card / LittleFS) and file uploads also refresh the list automatically after completing.
+
 ## Validation
 
 After code changes:
