@@ -197,7 +197,7 @@ The implementation must use the project's actual SD-card hardware and ESP-IDF su
 - Select TRIP mode versus SPEED mode for the main display.
 - Provide the current trip distance in the lower part of SPEED mode.
 - Manage display backlight timeout.
-- Persist TOTAL distance through NVS.
+- Initialize TOTAL distance at 0 on startup; the current implementation does not persist TOTAL distance through NVS.
 - Refresh the LCD at the existing cadence.
 - Pass the integrated trip distance to SD-card export and display the processed-position count.
 
@@ -245,12 +245,14 @@ The current controls are source-defined:
 - Short Button B toggles the display backlight on or off when the system menu is closed.
 - Long Button B opens or closes the system menu.
 - Short Button C activates SPEED mode and toggles between SPEED and AVG SPEED.
-- Pressing a button while the display is off wakes it.
+- When the backlight is off, a press on any Button A, B, or C wakes the backlight and is consumed without performing that screen's button action. The next press performs the normal action for the active screen.
+- In the main screen, a short Button B press turns the backlight off; a subsequent short Button B press wakes it.
+- If the system menu, an action screen, [List Trips], or [Trip Info] has no button activity for more than 60 seconds, the application returns to the main screen. The [WiFi Menu] is excluded and remains active until a LONG-press on Button B.
 
 The position count shown on the second information bar is the number of
 positions successfully written to the active GPX/CSV export pair.
 
-Every button press/release is logged with the physical position, button name, `SHORT` or `LONG` press classification, and press duration. Menu cursor changes and selected actions are also logged.
+Every button press/release is logged with the button name including its physical position (`A (LEFT)`, `B (MIDDLE)`, or `C (RIGHT)`), `SHORT` or `LONG` press classification, and press duration. Menu cursor changes and selected actions are also logged.
 
 
 ### System Menu
@@ -340,7 +342,7 @@ The main display layout uses a 320x240 screen. The separator below the middle se
 
 The backlight timeout depends on battery level and is disabled while charging. Preserve the existing timeout behavior in `app_main.c`.
 
-TOTAL distance is stored in NVS under the existing namespace and key. Preserve the current checkpoint strategy and units.
+TOTAL distance is currently runtime-only and is initialized to 0 on startup; there is no NVS persistence for TOTAL distance in the current implementation.
 
 ### List Trip Files / `[List Trips]`
 

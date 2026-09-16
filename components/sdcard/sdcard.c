@@ -30,7 +30,7 @@
 //-- TEMPORARY debug switch: keep trip files with fewer than 20 entries
 //-- instead of deleting them, so recorded points can be inspected while the
 //-- GPX/CSV export bug is being diagnosed. Set back to 0 once confirmed fixed.
-#define SDCARD_KEEP_SMALL_TRIP_FILES 1
+#define SDCARD_KEEP_SMALL_TRIP_FILES 0
 
 static const char* TAG = "sdcard";
 static sdmmc_card_t* s_card;

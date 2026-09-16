@@ -23,7 +23,7 @@
 // — Program version string (keep manually updated with each release)
 // — NEVER CHANGE THIS const char* NAME
 // —             vvvvvvvvvvvvvv
-static const char* PROG_VERSION = "v1.2.3";
+static const char* PROG_VERSION = "v1.2.4";
 // —             ^^^^^^^^^^^^^^
 static const char* TAG = "m5speed";
 
@@ -39,6 +39,7 @@ static const char* TAG = "m5speed";
 //-- Trip file pairs with a .gpx file smaller than this are deleted when
 //-- [WiFi Menu] starts.
 #define WIFI_MENU_MIN_TRIP_GPX_BYTES 5120
+#define FOLLOWUP_SCREEN_TIMEOUT_US 60000000LL
 
 static bool g_show_average = false;
 static bool g_show_total = false;
@@ -149,6 +150,23 @@ static void turn_display_off(bool forced)
   g_display_forced_off = forced;
 }
 
+static bool followup_screen_is_active(void)
+{
+  return g_system_menu || g_menu_action_active || g_list_trips_menu || g_trip_info_menu;
+}
+
+static void return_to_main_screen(void)
+{
+  g_system_menu = false;
+  g_menu_action_active = false;
+  g_menu_action_pending = false;
+  g_list_trips_menu = false;
+  g_trip_info_menu = false;
+  webserver_stop();
+  lcd_force_redraw();
+  ESP_LOGI(TAG, "Follow-up screen timeout => [Main screen]");
+}
+
 static void reset_trip(speedometer_t* speedo)
 {
   speedometer_reset_trip(speedo);
@@ -171,6 +189,15 @@ static void format_sdcard(void)
 
 static void handle_button(board_button_t button, bool long_press, speedometer_t* speedo)
 {
+  if (!g_display_on)
+  {
+    turn_display_on();
+    g_display_forced_off = false;
+    return;
+  }
+
+  g_last_user_activity_us = esp_timer_get_time();
+
   if (g_wifi_menu)
   {
     if (button == BOARD_BUTTON_B && long_press)
@@ -280,15 +307,6 @@ static void handle_button(board_button_t button, bool long_press, speedometer_t*
     lcd_force_redraw();
     return;
   }
-
-  if (!g_display_on)
-  {
-    turn_display_on();
-    g_display_forced_off = false;
-    return;
-  }
-
-  g_last_user_activity_us = esp_timer_get_time();
 
   if (g_system_menu)
   {
@@ -479,6 +497,12 @@ void app_main(void)
     while (board_get_button_event(&event))
     {
       handle_button(event.button, event.long_press, &speedo);
+    }
+
+    if (!g_wifi_menu && followup_screen_is_active() &&
+        now_us - g_last_user_activity_us > FOLLOWUP_SCREEN_TIMEOUT_US)
+    {
+      return_to_main_screen();
     }
 
     if (g_menu_action_active && g_menu_action_pending &&
