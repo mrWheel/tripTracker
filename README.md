@@ -26,6 +26,13 @@ No Arduino framework, M5Unified, TinyGPS++ or other external component is requir
 
 The IP5306 reports battery level in coarse 25% steps; this is a limitation of the available battery-status register, not of the UI.
 
+## Photos
+
+![TripTracker photo 1](assets/IMG_0015.jpg)
+![TripTracker photo 2](assets/IMG_0016.jpg)
+![TripTracker photo 3](assets/IMG_0017.jpg)
+![TripTracker photo 4](assets/IMG_0018.jpg)
+
 ## Battery-dependent display timeout
 
 While charging over USB, automatic display timeout is disabled.
