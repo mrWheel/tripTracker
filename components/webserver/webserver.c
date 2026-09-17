@@ -1,5 +1,6 @@
 #include "webserver.h"
 
+#include <stdarg.h>
 #include <stdbool.h>
 
 #include "esp_event.h"
@@ -18,7 +19,7 @@
 //-- mDNS hostname, reachable as "tripTracker.local" while WiFi is active.
 #define WEBSERVER_HOSTNAME "tripTracker"
 
-static const char *TAG = "webserver";
+static const char* TAG = "webserver";
 static httpd_handle_t s_server;
 static bool s_network_active;
 static bool s_mdns_active;
@@ -29,14 +30,69 @@ static volatile bool s_connecting;
 static volatile bool s_sta_connected;
 static volatile bool s_ap_mode;
 static bool s_wifi_event_handlers_registered;
+//-- Optional sink for short, user-facing status lines (see webserver_set_status_log()).
+static webserver_status_log_fn_t s_status_log_fn;
+
+//-- Log a short status line via ESP_LOGI and forward it to s_status_log_fn,
+//-- e.g. for display on the [Start Webserver] screen.
+static void report_status(const char* fmt, ...)
+{
+  char message[64];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(message, sizeof(message), fmt, args);
+  va_end(args);
+  ESP_LOGI(TAG, "%s", message);
+  if (s_status_log_fn)
+  {
+    s_status_log_fn(message, WEBSERVER_LOG_INFO);
+  }
+}
+
+//-- Same as report_status(), but flags the line as an error for on-screen
+//-- highlighting (e.g. the known AP not being found).
+static void report_error(const char* fmt, ...)
+{
+  char message[64];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(message, sizeof(message), fmt, args);
+  va_end(args);
+  ESP_LOGW(TAG, "%s", message);
+  if (s_status_log_fn)
+  {
+    s_status_log_fn(message, WEBSERVER_LOG_ERROR);
+  }
+}
+
+//-- Same as report_status(), but flags the line for on-screen success/green
+//-- highlighting (e.g. the SSID/IP that was just connected to).
+static void report_success(const char* fmt, ...)
+{
+  char message[64];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(message, sizeof(message), fmt, args);
+  va_end(args);
+  ESP_LOGI(TAG, "%s", message);
+  if (s_status_log_fn)
+  {
+    s_status_log_fn(message, WEBSERVER_LOG_SUCCESS);
+  }
+}
+
+void webserver_set_status_log(webserver_status_log_fn_t fn)
+{
+  s_status_log_fn = fn;
+}
 
 static esp_err_t mount_littlefs(void)
 {
   esp_vfs_littlefs_conf_t conf = {
-    .base_path = WEBSERVER_LITTLEFS_MOUNT_POINT,
-    .partition_label = "littlefs",
-    .format_if_mount_failed = true,
-    .dont_mount = false,
+      .base_path = WEBSERVER_LITTLEFS_MOUNT_POINT,
+      .partition_label = "littlefs",
+      .format_if_mount_failed = true,
+      .dont_mount = false,
   };
 
   esp_err_t err = esp_vfs_littlefs_register(&conf);
@@ -69,7 +125,8 @@ static void start_http_server(void)
   webserver_api_register(s_server);
   webserver_static_register(s_server);
 
-  ESP_LOGI(TAG, "File-manager web server started");
+  report_status("Starting Webserver");
+  report_success("> Webserver active");
 }
 
 static void stop_http_server(void)
@@ -88,10 +145,16 @@ static void on_wifi_connected(void)
   //-- Fires when the portal flow hands over a working STA connection.
   s_sta_connected = true;
   s_ap_mode = false;
+  char ssid[33] = "";
+  char ip_address[16] = "";
+  webserver_get_wifi_display_info(ssid, sizeof(ssid), ip_address, sizeof(ip_address));
+  report_status("Connecting to:");
+  report_success("> %s", ssid);
+  report_success("> %s", ip_address);
   start_http_server();
 }
 
-static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+static void on_wifi_event(void* arg, esp_event_base_t base, int32_t id, void* data)
 {
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED)
   {
@@ -159,12 +222,13 @@ static void stop_mdns(void)
 
 //-- Runs the (potentially slow, multi-second) connect-or-provision attempt on
 //-- its own task so opening the System Menu never blocks the UI loop.
-static void wifi_connect_task(void *arg)
+static void wifi_connect_task(void* arg)
 {
   wifi_prov_config_t config = WIFI_PROV_DEFAULT_CONFIG();
   config.ap_ssid = WEBSERVER_HOSTNAME;
   config.on_connected = on_wifi_connected;
 
+  report_status("Connecting to known AP");
   esp_err_t err = wifi_prov_start(&config);
   if (err == ESP_OK)
   {
@@ -177,6 +241,15 @@ static void wifi_connect_task(void *arg)
     else
     {
       s_ap_mode = true;
+      //-- The known AP could not be reached: this is exceptional, so guide
+      //-- the user clearly on what to do next, one short line at a time.
+      report_error("NOT FOUND!");
+      report_status("Starting Captive Portal");
+      report_status("Connect WiFi to:");
+      report_status("%s", WEBSERVER_HOSTNAME);
+      report_status("Browse to:");
+      report_status("%s.local", WEBSERVER_HOSTNAME);
+      report_status("or 192.168.1.4");
     }
   }
   else
@@ -228,7 +301,8 @@ esp_err_t webserver_start(void)
   wifi_prov_init();
   register_wifi_event_handlers();
 
-  if (xTaskCreate(wifi_connect_task, "wifi_connect", 4096, NULL, tskIDLE_PRIORITY + 1, NULL) != pdPASS)
+  if (xTaskCreate(wifi_connect_task, "wifi_connect", 4096, NULL, tskIDLE_PRIORITY + 1, NULL) !=
+      pdPASS)
   {
     ESP_LOGE(TAG, "Failed to create WiFi connect task");
     s_connecting = false;
@@ -284,8 +358,8 @@ webserver_wifi_status_t webserver_get_wifi_status(void)
   return WEBSERVER_WIFI_OFF;
 }
 
-void webserver_get_wifi_display_info(char *ssid, size_t ssid_size,
-                                     char *ip_address, size_t ip_address_size)
+void webserver_get_wifi_display_info(char* ssid, size_t ssid_size, char* ip_address,
+                                     size_t ip_address_size)
 {
   if (ssid && ssid_size > 0)
   {
@@ -301,13 +375,13 @@ void webserver_get_wifi_display_info(char *ssid, size_t ssid_size,
     wifi_config_t config = {0};
     if (esp_wifi_get_config(WIFI_IF_STA, &config) == ESP_OK)
     {
-      snprintf(ssid, ssid_size, "%s", (char *)config.sta.ssid);
+      snprintf(ssid, ssid_size, "%s", (char*)config.sta.ssid);
     }
   }
 
   if (ip_address && ip_address_size > 0)
   {
-    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     esp_netif_ip_info_t ip_info;
     if (netif && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK)
     {

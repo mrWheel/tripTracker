@@ -51,9 +51,23 @@ typedef struct
 } sdcard_trip_details_t;
 
 esp_err_t sdcard_init(void);
+//-- Status line severity for the optional on-screen [Start Webserver] log.
+typedef enum
+{
+  SDCARD_LOG_INFO,
+  SDCARD_LOG_SUCCESS,
+} sdcard_log_level_t;
+//-- Optional callback receiving short, user-facing status lines (e.g. trip
+//-- files being closed or removed) in addition to the normal ESP_LOGI trace.
+typedef void (*sdcard_status_log_fn_t)(const char* message, sdcard_log_level_t level);
+void sdcard_set_status_log(sdcard_status_log_fn_t fn);
 esp_err_t sdcard_reset_trip(void);
 esp_err_t sdcard_format(void);
 esp_err_t sdcard_remove_small_trip_files(void);
+//-- Closes the active trip file (if any) and finalizes/renames every other
+//-- GPX file still carrying the "O" open marker. Does not create a new trip
+//-- file; call sdcard_reset_trip() afterwards to start the next one.
+esp_err_t sdcard_close_all_open_trip_files(void);
 //-- Deletes trip file pairs whose .gpx file is smaller than min_gpx_bytes;
 //-- skips the currently active (recording) trip.
 esp_err_t sdcard_remove_undersized_trip_files(size_t min_gpx_bytes);

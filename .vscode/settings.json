@@ -21,6 +21,18 @@
     "/^source \"\\$HOME/\\.espressif/tools/activate_idf_v6\\.0\\.2\\.sh\" && cd /Users/willema/Documents/espidfProjects\\.nosync/tripTracker && idf\\.py build 2>&1 \\| tail -80$/": {
       "approve": true,
       "matchCommandLine": true
+    },
+    "/^source \\$HOME/\\.espressif/tools/activate_idf_v6\\.0\\.2\\.sh && idf\\.py build 2>&1 \\| tail -n 60$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "/^source \\$HOME/\\.espressif/tools/activate_idf_v6\\.0\\.2\\.sh && idf\\.py build 2>&1 \\| tail -n 40$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "/^source \\$HOME/\\.espressif/tools/activate_idf_v6\\.0\\.2\\.sh && idf\\.py build 2>&1 \\| tail -n 80$/": {
+      "approve": true,
+      "matchCommandLine": true
     }
   }
 }

@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,10 +31,10 @@
 //-- TEMPORARY debug switch: keep trip files with fewer than 20 entries
 //-- instead of deleting them, so recorded points can be inspected while the
 //-- GPX/CSV export bug is being diagnosed. Set back to 0 once confirmed fixed.
-#define SDCARD_KEEP_SMALL_TRIP_FILES 0
+#define SDCARD_KEEP_SMALL_TRIP_FILES 1
 
 //-- A fix is skipped when stationary or when it barely moved since the last recorded point.
-static const float MIN_MOVEMENT_METERS = 3.0f;
+static const float MIN_MOVEMENT_METERS = 1.5f;
 
 static const char* TAG = "sdcard";
 static sdmmc_card_t* s_card;
@@ -53,6 +54,48 @@ static uint16_t s_current_trip_number;
 static bool s_waiting_for_gps_time;
 static bool s_waiting_for_new_filename;
 static char s_closed_gpx_path[64];
+//-- Set while [WiFi Menu] has closed every open trip file; no new trip file
+//-- is created and no GPS fixes are recorded until it is cleared again.
+static bool s_recording_suspended;
+//-- Optional sink for short, user-facing status lines (see sdcard_set_status_log()).
+static sdcard_status_log_fn_t s_status_log_fn;
+
+//-- Log a short status line via ESP_LOGI and forward it to s_status_log_fn,
+//-- e.g. for display on the [Start Webserver] screen.
+static void report_status(const char* fmt, ...)
+{
+  char message[64];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(message, sizeof(message), fmt, args);
+  va_end(args);
+  ESP_LOGI(TAG, "%s", message);
+  if (s_status_log_fn)
+  {
+    s_status_log_fn(message, SDCARD_LOG_INFO);
+  }
+}
+
+//-- Same as report_status(), but flags the line for on-screen success/green
+//-- highlighting (e.g. a filename that was just closed or removed).
+static void report_success(const char* fmt, ...)
+{
+  char message[64];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(message, sizeof(message), fmt, args);
+  va_end(args);
+  ESP_LOGI(TAG, "%s", message);
+  if (s_status_log_fn)
+  {
+    s_status_log_fn(message, SDCARD_LOG_SUCCESS);
+  }
+}
+
+void sdcard_set_status_log(sdcard_status_log_fn_t fn)
+{
+  s_status_log_fn = fn;
+}
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -164,8 +207,10 @@ static void build_trip_filenames(const gps_data_t* gps)
   gps_utc_to_local(gps, &local_year, &local_month, &local_day, &local_hour, &local_minute,
                    &local_second, &offset_hours);
 
+  //-- The "O" (open) marker right before ".gpx" marks a trip file that is
+  //-- still being recorded; it is dropped only once the trip is properly closed.
   snprintf(s_trip_gpx_path, sizeof(s_trip_gpx_path),
-           SD_MOUNT_POINT "/trip-%04d%02d%02d-%02d%02d%02d.gpx", (int)local_year, (int)local_month,
+           SD_MOUNT_POINT "/trip-%04d%02d%02d-%02d%02d%02dO.gpx", (int)local_year, (int)local_month,
            (int)local_day, (int)local_hour, (int)local_minute, (int)local_second);
   snprintf(s_trip_csv_path, sizeof(s_trip_csv_path),
            SD_MOUNT_POINT "/trip-%04d%02d%02d-%02d%02d%02d.csv", (int)local_year, (int)local_month,
@@ -247,48 +292,94 @@ static esp_err_t write_text(int file, const char* path, const char* text)
   return ESP_OK;
 }
 
-static esp_err_t remove_gpx_closing_tags(void)
+//-- Add the GPX closing tags to an open descriptor only if they are not
+//-- already present. Per-point appends no longer keep them up to date, so a
+//-- trip file only becomes valid, closed GPX again once it is actually finalized.
+static esp_err_t ensure_gpx_file_closed(int fd, const char* path)
 {
-  if (s_trip_gpx_fd < 0)
-    return ESP_ERR_INVALID_STATE;
-
-  off_t file_size = lseek(s_trip_gpx_fd, 0, SEEK_END);
+  off_t file_size = lseek(fd, 0, SEEK_END);
   size_t read_size = file_size > 128 ? 128 : (size_t)file_size;
   char tail[129] = {0};
-  if (file_size < 0 || lseek(s_trip_gpx_fd, -((off_t)read_size), SEEK_END) < 0 ||
-      read(s_trip_gpx_fd, tail, read_size) != (ssize_t)read_size)
+  bool has_closing_tags = false;
+  if (file_size >= 0 && lseek(fd, -((off_t)read_size), SEEK_END) >= 0 &&
+      read(fd, tail, read_size) == (ssize_t)read_size)
+  {
+    has_closing_tags = strstr(tail, "</gpx>") != NULL;
+  }
+  if (lseek(fd, 0, SEEK_END) < 0)
   {
     return ESP_FAIL;
   }
-
-  char* closing_tags = strstr(tail, "</trkseg>");
-  if (closing_tags)
+  if (has_closing_tags)
   {
-    off_t truncate_at = file_size - (off_t)read_size + (off_t)(closing_tags - tail);
-    if (ftruncate(s_trip_gpx_fd, truncate_at) != 0)
-    {
-      return ESP_FAIL;
-    }
+    return ESP_OK;
   }
-
-  //-- The preceding read() left the file offset at the old EOF; without
-  //-- repositioning, the next write() lands past the truncated end and
-  //-- leaves a zero-filled gap instead of appending visible content.
-  if (lseek(s_trip_gpx_fd, 0, SEEK_END) < 0)
+  if (write_text(fd, path, "  </trkseg></trk>\n</gpx>\n") != ESP_OK || fsync(fd) != 0)
   {
     return ESP_FAIL;
   }
   return ESP_OK;
 }
 
-static esp_err_t finalize_gpx_file(void)
+//-- Drop the "O" (open) marker from a closed GPX filename, e.g.
+//-- "trip-20260917-143022O.gpx" => "trip-20260917-143022.gpx".
+static esp_err_t rename_gpx_remove_open_marker(const char* open_path, char* closed_path,
+                                               size_t closed_path_size)
 {
-  if (write_text(s_trip_gpx_fd, s_trip_gpx_path, "  </trkseg></trk>\n</gpx>\n") != ESP_OK ||
-      fsync(s_trip_gpx_fd) != 0)
+  size_t length = strlen(open_path);
+  if (length < 5 || strcmp(open_path + length - 5, "O.gpx") != 0)
   {
+    snprintf(closed_path, closed_path_size, "%s", open_path);
+    return ESP_OK;
+  }
+  snprintf(closed_path, closed_path_size, "%.*s.gpx", (int)(length - 5), open_path);
+  ESP_LOGI(TAG, "rename(\"%s\", \"%s\")", open_path, closed_path);
+  if (rename(open_path, closed_path) != 0)
+  {
+    ESP_LOGE(TAG, "Cannot rename %s to %s, errno=%d", open_path, closed_path, errno);
+    snprintf(closed_path, closed_path_size, "%s", open_path);
     return ESP_FAIL;
   }
+  {
+    //-- Reported as two short lines (label, then the closed filename in
+    //-- green) so neither one can run past the [Start Webserver] screen
+    //-- width; the filename is the renamed one, without the "O" marker.
+    const char* base = strrchr(closed_path, '/');
+    base = base ? base + 1 : closed_path;
+    report_status("Closing tripFile:");
+    report_success("%s", base);
+  }
   return ESP_OK;
+}
+
+//-- Finalize and rename the active GPX file. This is the only place closing
+//-- tags are (re)written now that per-point appends no longer maintain them.
+static esp_err_t finalize_active_gpx_and_rename(void)
+{
+  if (s_trip_gpx_fd < 0)
+    return ESP_OK;
+
+  esp_err_t result = ESP_OK;
+  if (ensure_gpx_file_closed(s_trip_gpx_fd, s_trip_gpx_path) != ESP_OK)
+  {
+    result = ESP_FAIL;
+  }
+  if (close(s_trip_gpx_fd) != 0)
+  {
+    result = ESP_FAIL;
+  }
+  s_trip_gpx_fd = -1;
+
+  char closed_path[sizeof(s_trip_gpx_path)];
+  if (rename_gpx_remove_open_marker(s_trip_gpx_path, closed_path, sizeof(closed_path)) == ESP_OK)
+  {
+    snprintf(s_trip_gpx_path, sizeof(s_trip_gpx_path), "%s", closed_path);
+  }
+  else
+  {
+    result = ESP_FAIL;
+  }
+  return result;
 }
 
 static bool is_trip_filename(const char* name)
@@ -450,12 +541,10 @@ static esp_err_t close_trip_files(void)
   esp_err_t result = ESP_OK;
   if (s_trip_gpx_fd >= 0)
   {
-    if (remove_gpx_closing_tags() != ESP_OK || finalize_gpx_file() != ESP_OK ||
-        close(s_trip_gpx_fd) != 0)
+    if (finalize_active_gpx_and_rename() != ESP_OK)
     {
       result = ESP_FAIL;
     }
-    s_trip_gpx_fd = -1;
   }
   if (s_trip_csv_fd >= 0)
   {
@@ -478,6 +567,14 @@ static esp_err_t save_active_gpx_path(void)
   if (result == ESP_OK)
     result = nvs_commit(handle);
   nvs_close(handle);
+  if (result == ESP_OK)
+  {
+    ESP_LOGI(TAG, "NVS active_gpx => [%s]", s_trip_gpx_path);
+  }
+  else
+  {
+    ESP_LOGE(TAG, "Cannot save NVS active_gpx [%s]: %s", s_trip_gpx_path, esp_err_to_name(result));
+  }
   return result;
 }
 
@@ -489,6 +586,7 @@ static void clear_active_gpx_path(void)
   nvs_erase_key(handle, SDCARD_NVS_ACTIVE_GPX);
   nvs_commit(handle);
   nvs_close(handle);
+  ESP_LOGI(TAG, "NVS active_gpx => [cleared]");
 }
 
 static esp_err_t recover_active_trip(void)
@@ -500,9 +598,11 @@ static esp_err_t recover_active_trip(void)
   {
     if (handle)
       nvs_close(handle);
+    ESP_LOGI(TAG, "NVS active_gpx => [not found]");
     return ESP_ERR_NOT_FOUND;
   }
   nvs_close(handle);
+  ESP_LOGI(TAG, "NVS active_gpx <= [%s]", s_trip_gpx_path);
 
   size_t path_length = strlen(s_trip_gpx_path);
   if (path_length <= 4 || strcmp(s_trip_gpx_path + path_length - 4, ".gpx") != 0)
@@ -623,10 +723,15 @@ esp_err_t sdcard_remove_small_trip_files(void)
       continue;
     }
 
-    bool gpx = strcmp(path + strlen(path) - 4, ".gpx") == 0;
-    bool small_file = count_trip_entries(path, gpx) < 20;
+    bool small_file;
 #if SDCARD_KEEP_SMALL_TRIP_FILES
+    //-- The result is discarded below anyway while this debug switch is on;
+    //-- skip the full-file entry count so cleanup doesn't scan every trip
+    //-- file's content on every [Start Webserver] entry.
     small_file = false;
+#else
+    bool gpx = strcmp(path + strlen(path) - 4, ".gpx") == 0;
+    small_file = count_trip_entries(path, gpx) < 20;
 #endif
     if (small_file && remove(path) != 0)
     {
@@ -635,7 +740,8 @@ esp_err_t sdcard_remove_small_trip_files(void)
     }
     else if (small_file)
     {
-      ESP_LOGI(TAG, "Deleted small trip file %s", path);
+      report_status("Removing empty tripFile:");
+      report_success("%s", entry->d_name);
     }
   }
   closedir(directory);
@@ -703,6 +809,9 @@ esp_err_t sdcard_remove_undersized_trip_files(size_t min_gpx_bytes)
     {
       continue;
     }
+#if SDCARD_KEEP_SMALL_TRIP_FILES
+    continue;
+#endif
 
     char csv_path[sizeof(s_trip_csv_path)];
     snprintf(csv_path, sizeof(csv_path), "%.*s.csv", written - 4, gpx_path);
@@ -714,10 +823,80 @@ esp_err_t sdcard_remove_undersized_trip_files(size_t min_gpx_bytes)
     }
     else
     {
-      ESP_LOGI(TAG, "Deleted undersized trip file %s (%ld bytes)", gpx_path, (long)file_size);
+      report_status("Removing empty tripFile:");
+      report_success("%s", entry->d_name);
     }
     //-- The matching CSV may already be missing; a failed remove() here is not an error.
     remove(csv_path);
+  }
+  closedir(directory);
+  return result;
+}
+
+//-- Close the currently active trip file (if any) and finalize/rename every
+//-- other GPX file still carrying the "O" open marker, e.g. left over from a
+//-- crash or unexpected power loss. No new trip file is created here; that
+//-- only happens once [WiFi Menu] is left again (see sdcard_reset_trip()).
+esp_err_t sdcard_close_all_open_trip_files(void)
+{
+  if (!s_mounted)
+  {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t result = close_trip_files();
+  clear_active_gpx_path();
+  s_waiting_for_gps_time = false;
+  s_waiting_for_new_filename = false;
+  s_recording_suspended = true;
+
+  DIR* directory = opendir(SD_MOUNT_POINT);
+  if (!directory)
+  {
+    ESP_LOGE(TAG, "Cannot open SD card directory to close open trip files");
+    return ESP_FAIL;
+  }
+
+  struct dirent* entry;
+  while ((entry = readdir(directory)) != NULL)
+  {
+    size_t name_length = strlen(entry->d_name);
+    if (name_length < 5 || strcmp(entry->d_name + name_length - 5, "O.gpx") != 0)
+    {
+      continue;
+    }
+
+    char open_path[sizeof(s_trip_gpx_path)];
+    int written = snprintf(open_path, sizeof(open_path), SD_MOUNT_POINT "/%s", entry->d_name);
+    if (written < 0 || (size_t)written >= sizeof(open_path))
+    {
+      result = ESP_FAIL;
+      continue;
+    }
+
+    int fd = open(open_path, O_RDWR | O_APPEND);
+    if (fd < 0)
+    {
+      ESP_LOGW(TAG, "Cannot open orphaned trip file %s, errno=%d", open_path, errno);
+      result = ESP_FAIL;
+      continue;
+    }
+
+    bool ok = ensure_gpx_file_closed(fd, open_path) == ESP_OK;
+    if (close(fd) != 0)
+    {
+      ok = false;
+    }
+    char closed_path[sizeof(s_trip_gpx_path)];
+    if (ok && rename_gpx_remove_open_marker(open_path, closed_path, sizeof(closed_path)) != ESP_OK)
+    {
+      ok = false;
+    }
+    if (!ok)
+    {
+      ESP_LOGW(TAG, "Cannot finalize orphaned trip file %s", open_path);
+      result = ESP_FAIL;
+    }
   }
   closedir(directory);
   return result;
@@ -760,7 +939,7 @@ static esp_err_t create_trip_file(const gps_data_t* gps)
       write_text(s_trip_csv_fd, s_trip_csv_path,
                  "date,time,latitude_deg,longitude_deg,altitude_m,speed_kmh,course_deg,satellites,"
                  "distance_m\n") != ESP_OK ||
-      fsync(s_trip_gpx_fd) != 0 || fsync(s_trip_csv_fd) != 0 || finalize_gpx_file() != ESP_OK)
+      fsync(s_trip_gpx_fd) != 0 || fsync(s_trip_csv_fd) != 0)
   {
     close_trip_files();
     remove(s_trip_gpx_path);
@@ -836,6 +1015,7 @@ esp_err_t sdcard_reset_trip(void)
 {
   if (!s_mounted)
     return ESP_ERR_INVALID_STATE;
+  s_recording_suspended = false;
   bool retained_closed_trip = false;
   if (s_trip_gpx_fd >= 0 || s_trip_csv_fd >= 0)
   {
@@ -908,6 +1088,13 @@ esp_err_t sdcard_append_fix(const gps_data_t* gps, float trip_distance_m, bool s
     return ESP_ERR_INVALID_STATE;
   }
 
+  //-- No active trip while [WiFi Menu] has closed every open trip file; a new
+  //-- one only starts after the menu is left (see sdcard_reset_trip()).
+  if (s_recording_suspended)
+  {
+    return ESP_OK;
+  }
+
   if (s_waiting_for_gps_time)
   {
     if (!gps->date_valid)
@@ -953,16 +1140,6 @@ esp_err_t sdcard_append_fix(const gps_data_t* gps, float trip_distance_m, bool s
              gps->sequence, trip_distance_m, distance_since_last_m);
   }
 
-  if (remove_gpx_closing_tags() != ESP_OK)
-  {
-    ESP_LOGE(TAG, "Cannot prepare GPX file for the next point");
-    return ESP_FAIL;
-  }
-  else
-  {
-    ESP_LOGI(TAG, "Recording first GPS point: sequence=%u", gps->sequence);
-  }
-
   s_trip_distance_m = fmaxf(0.0f, trip_distance_m);
 
   //-- GPX/CSV position timestamps must be the raw GPS Zulu (UTC) time, not the
@@ -988,7 +1165,7 @@ esp_err_t sdcard_append_fix(const gps_data_t* gps, float trip_distance_m, bool s
       (size_t)csv_written >= sizeof(csv_row) ||
       write_text(s_trip_gpx_fd, s_trip_gpx_path, gpx_point) != ESP_OK ||
       write_text(s_trip_csv_fd, s_trip_csv_path, csv_row) != ESP_OK || fsync(s_trip_gpx_fd) != 0 ||
-      fsync(s_trip_csv_fd) != 0 || finalize_gpx_file() != ESP_OK)
+      fsync(s_trip_csv_fd) != 0)
   {
     ESP_LOGE(TAG, "Failed to write GPX/CSV GPS point");
     return ESP_FAIL;
@@ -1031,6 +1208,10 @@ void sdcard_get_active_trip_datetime(char* out, size_t out_size)
   size_t length = strlen(start);
   if (length > 4 && strcmp(start + length - 4, ".gpx") == 0)
     length -= 4;
+  //-- Drop the "O" (open) marker so the displayed datetime matches the final
+  //-- "EEYYMMDD-HHmmSS" filename once the trip file is closed.
+  if (length > 0 && start[length - 1] == 'O')
+    --length;
   if (length >= out_size)
     length = out_size - 1;
   memcpy(out, start, length);

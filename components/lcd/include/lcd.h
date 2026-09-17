@@ -26,6 +26,10 @@ typedef enum
   LCD_WIFI_AP_MODE,
 } lcd_wifi_status_t;
 
+//-- Scrolling status log shown on the [Start Webserver] screen.
+#define LCD_WIFI_LOG_MAX_LINES 6
+#define LCD_WIFI_LOG_LINE_LEN 40
+
 typedef struct
 {
   uint16_t year;
@@ -63,6 +67,9 @@ typedef struct
   lcd_wifi_status_t wifi_status;
   char wifi_ssid[33];
   char wifi_ip_address[16];
+  char wifi_log_lines[LCD_WIFI_LOG_MAX_LINES][LCD_WIFI_LOG_LINE_LEN];
+  uint16_t wifi_log_colors[LCD_WIFI_LOG_MAX_LINES];
+  uint8_t wifi_log_count;
   bool list_trips_menu;
   const lcd_trip_entry_t* trip_entries;
   size_t trip_entry_count;

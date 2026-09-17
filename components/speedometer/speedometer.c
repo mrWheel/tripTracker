@@ -135,7 +135,7 @@ void speedometer_log_diagnostics(speedometer_t* s, int64_t now_us)
     return;
 
   s->last_diagnostic_us = now_us;
-  ESP_LOGI(TAG, "GPS: raw=%.2fm/s filtered=%.2fm/s display=%.1fkm/h state=%s samples=%u fix=%s",
+  ESP_LOGD(TAG, "GPS: raw=%.2fm/s filtered=%.2fm/s display=%.1fkm/h state=%s samples=%u fix=%s",
            s->raw_speed_kmh / 3.6f, s->filtered_speed_kmh / 3.6f, s->display_speed_kmh,
            s->stationary ? "STATIONARY" : "MOVING", s->diagnostic_sample_count,
            s->gps_fix ? "VALID" : "INVALID");

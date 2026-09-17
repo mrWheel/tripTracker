@@ -209,6 +209,20 @@ static void draw_text_centered(int y, const char* s, int scale, uint16_t color)
   draw_text((LCD_W - w) / 2, y, s, scale, color);
 }
 
+//-- Draws text truncated (dropping trailing characters) so it never runs
+//-- past max_width pixels; used for the [Start Webserver] status log, whose
+//-- lines come from filenames of unpredictable length.
+static void draw_text_clipped(int x, int y, const char* s, int scale, uint16_t color, int max_width)
+{
+  char clipped[LCD_WIFI_LOG_LINE_LEN];
+  snprintf(clipped, sizeof(clipped), "%s", s);
+  while (clipped[0] && text_width(clipped, scale) > max_width)
+  {
+    clipped[strlen(clipped) - 1] = '\0';
+  }
+  draw_text(x, y, clipped, scale, color);
+}
+
 //-- Inserts ',' thousand separators into a non-negative integer string.
 static void format_thousands(uint64_t value, char* out, size_t out_size)
 {
@@ -619,7 +633,7 @@ void lcd_render(const lcd_view_t* v)
         action = "Used and Free";
         break;
       case 2:
-        action = "Wifi menu";
+        action = "Start Webserver";
         break;
       case 3:
         action = "Reset Tracker";
@@ -678,32 +692,20 @@ void lcd_render(const lcd_view_t* v)
 
   if (v->wifi_status != LCD_WIFI_NONE && !v->system_menu)
   {
-    if (full || s_prev.wifi_status != v->wifi_status || s_prev.system_menu)
+    bool log_changed =
+        s_prev.wifi_log_count != v->wifi_log_count ||
+        memcmp(s_prev.wifi_log_lines, v->wifi_log_lines, sizeof(v->wifi_log_lines)) != 0 ||
+        memcmp(s_prev.wifi_log_colors, v->wifi_log_colors, sizeof(v->wifi_log_colors)) != 0;
+    if (full || s_prev.wifi_status != v->wifi_status || s_prev.system_menu || log_changed)
     {
       fill_rect(0, 0, LCD_W, LCD_H, LCD_COLOR_BLACK);
-      draw_header("WiFi MENU", v->prog_version);
-      if (v->wifi_status == LCD_WIFI_CONNECTING)
+      draw_header("Start Webserver", v->prog_version);
+      int y = 45;
+      for (uint8_t i = 0; i < v->wifi_log_count && i < LCD_WIFI_LOG_MAX_LINES; ++i)
       {
-        draw_text_centered(88, "Connecting to AP", 2, LCD_COLOR_YELLOW);
-      }
-      else if (v->wifi_status == LCD_WIFI_CONNECTED)
-      {
-        char ssid[40];
-        snprintf(ssid, sizeof(ssid), "\"%s\"", v->wifi_ssid);
-        draw_text(7, 65, "Connected to:", 2, LCD_COLOR_WHITE);
-        draw_text(7, 99, ssid, 2, LCD_COLOR_GREEN);
-        draw_text(7, 133, v->wifi_ip_address, 2, LCD_COLOR_GREEN);
-        draw_text(7, 167, "Webserver:", 2, LCD_COLOR_WHITE);
-        draw_text(7 + text_width("Webserver:", 2) + 5, 167, "Active", 2, LCD_COLOR_GREEN);
-      }
-      else
-      {
-        const char* hostname = "tripTracker";
-        draw_text_centered(60, "Captive portal: Active", 2, LCD_COLOR_YELLOW);
-        draw_text_centered(92, "In settings select", 2, LCD_COLOR_WHITE);
-        draw_text_centered(122, hostname, 2, LCD_COLOR_GREEN);
-        draw_text_centered(150, "Browse to 192.168.1.4", 2, LCD_COLOR_WHITE);
-        draw_text_centered(178, "to set WiFi Credentials", 2, LCD_COLOR_WHITE);
+        uint16_t color = v->wifi_log_colors[i] ? v->wifi_log_colors[i] : LCD_COLOR_YELLOW;
+        draw_text_clipped(7, y, v->wifi_log_lines[i], 2, color, LCD_W - 7);
+        y += 25;
       }
       draw_text(7, 211, "Long MidKey: Close", 2, LCD_COLOR_WHITE);
     }
@@ -739,8 +741,9 @@ void lcd_render(const lcd_view_t* v)
       fill_rect(0, 29, LCD_W, 1, LCD_COLOR_DARKGREY);
 
       static const char* const kMenuItems[] = {
-          "New Trip File", "Show Used and Free", "WiFi Menu", "Reset Tracker",
-          "Format SDcard", "List Trip Files",    "Exit",
+          "New Trip File", "Show Used and Free", "Start Webserver",
+          "Reset Tracker", "Format SDcard",      "List Trip Files",
+          "Exit",
       };
       const int kMenuItemCount = 7;
       const int kVisibleMenuItems = 6;

@@ -23,7 +23,7 @@
 // — Program version string (keep manually updated with each release)
 // — NEVER CHANGE THIS const char* NAME
 // —             vvvvvvvvvvvvvv
-static const char* PROG_VERSION = "v1.3.1";
+static const char* PROG_VERSION = "v1.3.2";
 // —             ^^^^^^^^^^^^^^
 static const char* TAG = "m5speed";
 
@@ -65,6 +65,69 @@ static size_t g_list_trips_scroll = 0;
 static size_t g_list_trips_selection = 0;
 static lcd_trip_entry_t g_trip_info_entry;
 static sdcard_trip_details_t g_trip_info_details;
+//-- Scrolling status log shown on the [Start Webserver] screen.
+static char g_wifi_log_lines[LCD_WIFI_LOG_MAX_LINES][LCD_WIFI_LOG_LINE_LEN];
+static uint16_t g_wifi_log_colors[LCD_WIFI_LOG_MAX_LINES];
+static uint8_t g_wifi_log_count;
+
+//-- Non-blocking startup steps for [Start Webserver]: each step runs on its
+//-- own main-loop iteration so the screen can redraw between them instead of
+//-- freezing for however long the SD-card cleanup takes.
+typedef enum
+{
+  WIFI_STARTUP_IDLE,
+  WIFI_STARTUP_CLOSE_TRIP_FILES,
+  WIFI_STARTUP_REMOVE_SMALL,
+  WIFI_STARTUP_REMOVE_UNDERSIZED,
+  WIFI_STARTUP_START_WEBSERVER,
+} wifi_startup_state_t;
+static wifi_startup_state_t g_wifi_startup_state = WIFI_STARTUP_IDLE;
+
+//-- Appends a status line (with its display color) to the [Start Webserver]
+//-- screen log; sdcard.c/webserver.c already ESP_LOGI/ESP_LOGW it themselves.
+static void wifi_log_append(const char* line, uint16_t color)
+{
+  if (g_wifi_log_count < LCD_WIFI_LOG_MAX_LINES)
+  {
+    snprintf(g_wifi_log_lines[g_wifi_log_count], LCD_WIFI_LOG_LINE_LEN, "%s", line);
+    g_wifi_log_colors[g_wifi_log_count] = color;
+    ++g_wifi_log_count;
+  }
+  else
+  {
+    memmove(g_wifi_log_lines[0], g_wifi_log_lines[1],
+            sizeof(g_wifi_log_lines) - sizeof(g_wifi_log_lines[0]));
+    memmove(g_wifi_log_colors, g_wifi_log_colors + 1,
+            sizeof(g_wifi_log_colors) - sizeof(g_wifi_log_colors[0]));
+    snprintf(g_wifi_log_lines[LCD_WIFI_LOG_MAX_LINES - 1], LCD_WIFI_LOG_LINE_LEN, "%s", line);
+    g_wifi_log_colors[LCD_WIFI_LOG_MAX_LINES - 1] = color;
+  }
+  //-- Deliberately no lcd_force_redraw() here: that would re-run the
+  //-- expensive full-screen draw_static_frame() clear on every single log
+  //-- line, causing a visible flash/restart. lcd_render() already redraws
+  //-- this screen on its own whenever wifi_log_count/lines/colors change.
+}
+
+//-- sdcard.c's status-log callback: maps its level enum to a display color.
+static void sdcard_wifi_log(const char* message, sdcard_log_level_t level)
+{
+  wifi_log_append(message, level == SDCARD_LOG_SUCCESS ? LCD_COLOR_GREEN : LCD_COLOR_YELLOW);
+}
+
+//-- webserver.c's status-log callback: maps its level enum to a display color.
+static void webserver_wifi_log(const char* message, webserver_log_level_t level)
+{
+  uint16_t color = LCD_COLOR_YELLOW;
+  if (level == WEBSERVER_LOG_ERROR)
+  {
+    color = LCD_COLOR_RED;
+  }
+  else if (level == WEBSERVER_LOG_SUCCESS)
+  {
+    color = LCD_COLOR_GREEN;
+  }
+  wifi_log_append(message, color);
+}
 
 static const char* menu_option_name(uint8_t selection)
 {
@@ -75,7 +138,7 @@ static const char* menu_option_name(uint8_t selection)
   case 1:
     return "Show Used & Free on SD";
   case 2:
-    return "Enter WiFi Menu";
+    return "Start Webserver";
   case 3:
     return "Reset Tracker";
   case 4:
@@ -205,6 +268,10 @@ static void handle_button(board_button_t button, bool long_press, speedometer_t*
       g_wifi_menu = false;
       g_system_menu = true;
       webserver_stop();
+      if (sdcard_reset_trip() != ESP_OK)
+      {
+        ESP_LOGE(TAG, "Unable to create the next trip export after WiFi Menu");
+      }
       lcd_force_redraw();
       ESP_LOGI("board", "System Menu => [%s]", menu_option_name(g_menu_selection));
     }
@@ -339,16 +406,11 @@ static void handle_button(board_button_t button, bool long_press, speedometer_t*
         {
           g_wifi_menu = true;
           g_system_menu = false;
-          webserver_start();
-          ESP_LOGI("board", "WiFi Menu => [Active]");
-          if (sdcard_remove_small_trip_files() != ESP_OK)
-          {
-            ESP_LOGE(TAG, "Unable to remove small trip files");
-          }
-          if (sdcard_remove_undersized_trip_files(WIFI_MENU_MIN_TRIP_GPX_BYTES) != ESP_OK)
-          {
-            ESP_LOGE(TAG, "Unable to remove undersized trip files");
-          }
+          g_wifi_log_count = 0;
+          //-- Kick off the startup sequence; the main loop advances it one
+          //-- step per iteration so the screen shows up immediately and the
+          //-- log lines appear as each step completes, instead of freezing.
+          g_wifi_startup_state = WIFI_STARTUP_CLOSE_TRIP_FILES;
           lcd_force_redraw();
           break;
         }
@@ -390,11 +452,9 @@ static void handle_button(board_button_t button, bool long_press, speedometer_t*
   switch (button)
   {
   case BOARD_BUTTON_A:
-    if (long_press)
-    {
-      reset_trip(speedo);
-    }
-    else
+    //-- Long-press trip reset removed: [System Menu] > New Trip File already
+    //-- covers this and a bare long-press here was too easy to trigger by accident.
+    if (!long_press)
     {
       g_trip_mode = true;
     }
@@ -466,12 +526,14 @@ void app_main(void)
   {
     ESP_LOGE(TAG, "SD card unavailable: %s", esp_err_to_name(sdcard_err));
   }
+  sdcard_set_status_log(sdcard_wifi_log);
 
   esp_err_t webserver_err = webserver_init();
   if (webserver_err != ESP_OK)
   {
     ESP_LOGE(TAG, "Webserver unavailable: %s", esp_err_to_name(webserver_err));
   }
+  webserver_set_status_log(webserver_wifi_log);
 
   lcd_clear(LCD_COLOR_BLACK);
   lcd_set_backlight(true);
@@ -500,6 +562,42 @@ void app_main(void)
     while (board_get_button_event(&event))
     {
       handle_button(event.button, event.long_press, &speedo);
+    }
+
+    //-- Advance the [Start Webserver] startup sequence by one step per
+    //-- iteration; see wifi_startup_state_t for why this isn't done inline
+    //-- in the button handler.
+    switch (g_wifi_startup_state)
+    {
+    case WIFI_STARTUP_CLOSE_TRIP_FILES:
+      if (sdcard_close_all_open_trip_files() != ESP_OK)
+      {
+        ESP_LOGE(TAG, "Unable to close open trip files");
+      }
+      g_wifi_startup_state = WIFI_STARTUP_REMOVE_SMALL;
+      break;
+    case WIFI_STARTUP_REMOVE_SMALL:
+      if (sdcard_remove_small_trip_files() != ESP_OK)
+      {
+        ESP_LOGE(TAG, "Unable to remove small trip files");
+      }
+      g_wifi_startup_state = WIFI_STARTUP_REMOVE_UNDERSIZED;
+      break;
+    case WIFI_STARTUP_REMOVE_UNDERSIZED:
+      if (sdcard_remove_undersized_trip_files(WIFI_MENU_MIN_TRIP_GPX_BYTES) != ESP_OK)
+      {
+        ESP_LOGE(TAG, "Unable to remove undersized trip files");
+      }
+      g_wifi_startup_state = WIFI_STARTUP_START_WEBSERVER;
+      break;
+    case WIFI_STARTUP_START_WEBSERVER:
+      webserver_start();
+      ESP_LOGI("board", "Start Webserver => [Active]");
+      g_wifi_startup_state = WIFI_STARTUP_IDLE;
+      break;
+    case WIFI_STARTUP_IDLE:
+    default:
+      break;
     }
 
     if (!g_wifi_menu && followup_screen_is_active() &&
@@ -636,6 +734,7 @@ void app_main(void)
           .wifi_status = wifi_status,
           .wifi_ssid = "",
           .wifi_ip_address = "",
+          .wifi_log_count = g_wifi_log_count,
           .list_trips_menu = g_list_trips_menu,
           .trip_entries = g_trip_entries,
           .trip_entry_count = g_trip_entry_count,
@@ -653,6 +752,11 @@ void app_main(void)
       };
       snprintf(view.wifi_ssid, sizeof(view.wifi_ssid), "%s", wifi_ssid);
       snprintf(view.wifi_ip_address, sizeof(view.wifi_ip_address), "%s", wifi_ip_address);
+      for (uint8_t i = 0; i < g_wifi_log_count && i < LCD_WIFI_LOG_MAX_LINES; ++i)
+      {
+        memcpy(view.wifi_log_lines[i], g_wifi_log_lines[i], LCD_WIFI_LOG_LINE_LEN);
+        view.wifi_log_colors[i] = g_wifi_log_colors[i];
+      }
       sdcard_get_active_trip_datetime(view.trip_datetime, sizeof(view.trip_datetime));
       lcd_render(&view);
     }
