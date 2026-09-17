@@ -32,9 +32,7 @@
 //-- GPX/CSV export bug is being diagnosed. Set back to 0 once confirmed fixed.
 #define SDCARD_KEEP_SMALL_TRIP_FILES 0
 
-//-- A fix is only skipped when it is stationary noise (below this speed, same as the
-//-- previous fix) or when it barely moved since the last recorded point.
-static const float STATIONARY_SPEED_KMH = 0.5f;
+//-- A fix is skipped when stationary or when it barely moved since the last recorded point.
 static const float MIN_MOVEMENT_METERS = 3.0f;
 
 static const char* TAG = "sdcard";
@@ -903,7 +901,7 @@ esp_err_t sdcard_format(void)
   return create_err;
 }
 
-esp_err_t sdcard_append_fix(const gps_data_t* gps, float trip_distance_m)
+esp_err_t sdcard_append_fix(const gps_data_t* gps, float trip_distance_m, bool stationary)
 {
   if (!s_mounted || !gps)
   {
@@ -933,22 +931,19 @@ esp_err_t sdcard_append_fix(const gps_data_t* gps, float trip_distance_m)
   if (gps->sequence == 0)
     return ESP_ERR_INVALID_ARG;
 
-  //-- Write every fix unless it is stationary noise (this fix and the previous
-  //-- written fix both below STATIONARY_SPEED_KMH) or it barely moved since the
-  //-- last recorded point (below MIN_MOVEMENT_METERS).
+  //-- Write every fix unless the speedometer marks it stationary or it barely
+  //-- moved since the last recorded point (below MIN_MOVEMENT_METERS).
   if (s_has_last_coord)
   {
     double distance_since_last_m =
         calculate_distance_m(s_last_lat, s_last_lon, gps->latitude_deg, gps->longitude_deg);
 
-    bool both_stationary =
-        gps->speed_kmh < STATIONARY_SPEED_KMH && s_last_written_speed_kmh < STATIONARY_SPEED_KMH;
     bool insufficient_movement = distance_since_last_m < MIN_MOVEMENT_METERS;
 
     ESP_LOGD(TAG, "GPS point check: speed=%.2fkm/h last-speed=%.2fkm/h since-last=%.2fm",
              gps->speed_kmh, s_last_written_speed_kmh, distance_since_last_m);
 
-    if (both_stationary || insufficient_movement)
+    if (stationary || insufficient_movement)
     {
       s_last_sequence = gps->sequence;
       return ESP_OK;
@@ -968,11 +963,7 @@ esp_err_t sdcard_append_fix(const gps_data_t* gps, float trip_distance_m)
     ESP_LOGI(TAG, "Recording first GPS point: sequence=%u", gps->sequence);
   }
 
-  double segment_distance_m =
-      s_has_last_coord
-          ? calculate_distance_m(s_last_lat, s_last_lon, gps->latitude_deg, gps->longitude_deg)
-          : 0.0;
-  s_trip_distance_m += (float)segment_distance_m;
+  s_trip_distance_m = fmaxf(0.0f, trip_distance_m);
 
   //-- GPX/CSV position timestamps must be the raw GPS Zulu (UTC) time, not the
   //-- local time used only for the trip file names.

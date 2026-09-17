@@ -57,7 +57,7 @@ esp_err_t sdcard_remove_small_trip_files(void);
 //-- Deletes trip file pairs whose .gpx file is smaller than min_gpx_bytes;
 //-- skips the currently active (recording) trip.
 esp_err_t sdcard_remove_undersized_trip_files(size_t min_gpx_bytes);
-esp_err_t sdcard_append_fix(const gps_data_t* gps, float trip_distance_m);
+esp_err_t sdcard_append_fix(const gps_data_t* gps, float trip_distance_m, bool stationary);
 uint32_t sdcard_get_entry_count(void);
 void sdcard_get_status(sdcard_status_t* status);
 uint16_t sdcard_get_trip_number(void);

@@ -23,7 +23,7 @@
 // — Program version string (keep manually updated with each release)
 // — NEVER CHANGE THIS const char* NAME
 // —             vvvvvvvvvvvvvv
-static const char* PROG_VERSION = "v1.3.0";
+static const char* PROG_VERSION = "v1.3.1";
 // —             ^^^^^^^^^^^^^^
 static const char* TAG = "m5speed";
 
@@ -482,6 +482,9 @@ void app_main(void)
   g_last_user_activity_us = esp_timer_get_time();
   int64_t last_ui_us = 0;
   int64_t last_battery_us = 0;
+  int64_t last_gpx_log_us = 0;
+  gps_data_t latest_gps = {0};
+  bool has_latest_gps = false;
   int battery_pct = board_battery_level();
   bool charging = board_is_charging();
   sdcard_get_status(&g_storage_status);
@@ -544,7 +547,18 @@ void app_main(void)
     if (gps_get_latest(&gps))
     {
       speedometer_update(&speedo, &gps, now_us);
-      if (sdcard_append_fix(&gps, speedo.trip_distance_m) != ESP_OK && g_storage_status.mounted)
+      latest_gps = gps;
+      has_latest_gps = true;
+    }
+
+    speedometer_tick(&speedo, now_us);
+    speedometer_log_diagnostics(&speedo, now_us);
+
+    if (has_latest_gps && (last_gpx_log_us == 0 || now_us - last_gpx_log_us >= 1000000LL))
+    {
+      last_gpx_log_us = now_us;
+      if (sdcard_append_fix(&latest_gps, speedo.trip_distance_m, speedo.stationary) != ESP_OK &&
+          g_storage_status.mounted)
       {
         ESP_LOGE(TAG, "Unable to append GPS fix to SD card");
       }

@@ -150,18 +150,29 @@ The GPS configuration is defined in `main/app_main.c` and must remain consistent
 
 The GPS parser accepts checksummed NMEA RMC and GGA sentences. Preserve checksum validation, fix handling, satellite count handling, and the thread-safe latest-data interface.
 
+GPS processing and GPX logging are separate responsibilities. Preserve these invariants:
+
+- Continue parsing and processing every valid GPS update at approximately 10 Hz. Do not reduce GPS acquisition, parsing, speed filtering, position processing, or fix handling to 1 Hz.
+- Use the GNSS receiver's Speed Over Ground from RMC as the vehicle speed. Do not calculate displayed speed from coordinate distance divided by elapsed time, and do not add a calibration factor to match the vehicle speedometer.
+- Apply the speed filter to every valid sample using `filteredSpeed += 0.25 * (rawGpsSpeed - filteredSpeed)`. Keep full precision internally and round only for display formatting. Initialize the filter directly from the first valid sample and reinitialize it after fix loss when required.
+- Use stationary hysteresis based on GPS SOG: enter stationary below 2.0 km/h for 3 seconds and leave stationary above 3.0 km/h for 1 second. While stationary, display exactly 0 km/h and do not add position jitter to trip or total distance. Rebase any movement reference when leaving stationary mode so stationary displacement is never added later.
+- If GPS fixes become invalid or stale, do not leave an old speed displayed indefinitely; mark the fix invalid and clear the displayed speed.
+- The display may update independently from GPS acquisition. GPX logging must use a separate timer and write at most one trackpoint per second from the latest valid fix. Never write a trackpoint directly for every received GPS update, and do not solve duplicate timestamps by merely suppressing them after writing.
+- Temporary GPS diagnostics may log approximately once per second: raw speed, filtered speed, displayed speed, stationary/moving state, fix validity, and the number of GPS speed samples received during the preceding second. Diagnostics must not affect timing or processing.
+
 ## SD Card GPS Export
 
 Valid GPS fixes are processed for the active trip. The first valid fix is written.
-After that, a new fix is written every second unless it is skipped:
+After that, the separate GPX logging timer may write at most one fix per second unless it is skipped:
 
-- Skip when the fix reports a speed below `STATIONARY_SPEED_KMH` (0.5 km/h) and the
-  previously written fix was also below that speed.
+- Skip when the speedometer marks the current fix stationary.
 - Skip when the coordinate distance to the previously written fix is below
   `MIN_MOVEMENT_METERS` (3.0 meters).
 
-These thresholds are defined in `components/sdcard/sdcard.c`. This coordinate-distance
-check is independent of the integrated trip distance used by the TRIP display.
+`MIN_MOVEMENT_METERS` is defined in `components/sdcard/sdcard.c`. The coordinate-distance
+check is independent of the integrated trip distance used by the TRIP display. The
+integrated trip distance is based on filtered GPS SOG and must not increase because of
+stationary coordinate jitter.
 
 Each trip must use a new GPX file and CSV file when the trip is reset. Both files use this exact base name:
 
