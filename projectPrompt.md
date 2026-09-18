@@ -400,6 +400,16 @@ The lower display area must include a storage indicator bar showing the remainin
 
 The main display layout uses a 320x240 screen. The separator below the middle section is rendered below the large seven-segment digits, and the large digits are positioned low enough that the `TRIP`, `SPEED`, and `AVG SPEED` headings remain readable without overlap.
 
+### Large Seven-Segment Digit Style
+
+The SPEED and TRIP large digits are drawn by `draw_segment_digit()` in `components/lcd/lcd.c`, using pointed segment shapes rather than plain rectangles:
+
+- Each segment is a flattened hexagon that tapers to a 45-degree point at both ends, drawn via `fill_hbar_pointed()` (horizontal segments a/g/d) and `fill_vbar_pointed()` (vertical segments b/c/e/f/g), matching the look of a real LED seven-segment display.
+- An "on" segment is filled solid in the color passed to `draw_large_digits()` (white for both SPEED and TRIP). An "off" segment is cleared to black and then given a thin 1px `LCD_COLOR_DARKGREY` outline tracing the same hexagon shape (`outline_hbar_pointed()` / `outline_vbar_pointed()`) — the same color used for the header/footer separator lines. Do not fill "off" segments with a solid dark color.
+- The top segment (a) and bottom segment (d) are each drawn shifted 2px toward the digit's vertical center, versus their outer bounding box, so they sit slightly inset from the pure top/bottom edge.
+- The decimal point between digits is a round dot (`draw_dot()`, backed by `fill_circle()` / `draw_circle_outline()`), not a square: filled white when active, or a thin `LCD_COLOR_DARKGREY` ring when inactive.
+- The middle digit's x position (`digit1_x = 126` in `draw_large_digits()`) is fixed. The outer digits and each decimal dot are spaced out from it using a `gap` constant, using the screen width that a bare seven-segment digit does not need. Preserve `digit1_x` and this gap-based spacing unless a layout change is explicitly requested.
+
 The backlight timeout depends on battery level and is disabled while charging. Preserve the existing timeout behavior in `app_main.c`.
 
 TOTAL distance is currently runtime-only and is initialized to 0 on startup; there is no NVS persistence for TOTAL distance in the current implementation.

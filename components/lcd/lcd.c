@@ -304,42 +304,195 @@ static void format_trip_distance(float distance_m, char* out, size_t out_size)
 
 static const uint8_t seg_map[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};
 
-static void draw_segment_digit(int x, int y, int digit, uint16_t color, uint16_t off)
+//-- Fills a horizontal seven-segment bar shaped like a flattened hexagon:
+//-- the flat top/bottom run for most of its length, but both ends taper to
+//-- a 45-degree point instead of a square corner, matching real LED digits.
+static void fill_hbar_pointed(int x, int y, int len, int thick, uint16_t color)
+{
+  int half = thick / 2;
+  for (int r = 0; r < thick; ++r)
+  {
+    int diff = r - half;
+    int inset = diff < 0 ? -diff : diff;
+    int width = len - 2 * inset;
+    if (width > 0)
+      fill_rect(x + inset, y + r, width, 1, color);
+  }
+}
+
+//-- Same hexagon shape as fill_hbar_pointed(), but only the 1px boundary:
+//-- flat lines on the top/bottom rows, single diagonal pixels elsewhere.
+static void outline_hbar_pointed(int x, int y, int len, int thick, uint16_t color)
+{
+  int half = thick / 2;
+  for (int r = 0; r < thick; ++r)
+  {
+    int diff = r - half;
+    int inset = diff < 0 ? -diff : diff;
+    int width = len - 2 * inset;
+    if (width <= 0)
+      continue;
+    if (r == 0 || r == thick - 1)
+    {
+      fill_rect(x + inset, y + r, width, 1, color);
+    }
+    else
+    {
+      fill_rect(x + inset, y + r, 1, 1, color);
+      fill_rect(x + inset + width - 1, y + r, 1, 1, color);
+    }
+  }
+}
+
+//-- Vertical counterpart of fill_hbar_pointed(): flat left/right sides,
+//-- points at the top and bottom ends.
+static void fill_vbar_pointed(int x, int y, int len, int thick, uint16_t color)
+{
+  int half = thick / 2;
+  for (int c = 0; c < thick; ++c)
+  {
+    int diff = c - half;
+    int inset = diff < 0 ? -diff : diff;
+    int height = len - 2 * inset;
+    if (height > 0)
+      fill_rect(x + c, y + inset, 1, height, color);
+  }
+}
+
+static void outline_vbar_pointed(int x, int y, int len, int thick, uint16_t color)
+{
+  int half = thick / 2;
+  for (int c = 0; c < thick; ++c)
+  {
+    int diff = c - half;
+    int inset = diff < 0 ? -diff : diff;
+    int height = len - 2 * inset;
+    if (height <= 0)
+      continue;
+    if (c == 0 || c == thick - 1)
+    {
+      fill_rect(x + c, y + inset, 1, height, color);
+    }
+    else
+    {
+      fill_rect(x + c, y + inset, 1, 1, color);
+      fill_rect(x + c, y + inset + height - 1, 1, 1, color);
+    }
+  }
+}
+
+//-- An "off" segment is never left as leftover pixels from a previous digit:
+//-- its bounding box is cleared to black first, then given a thin light-grey
+//-- outline tracing the same pointed-hexagon shape as the "on" fill.
+static void draw_segment_h(int x, int y, int len, int thick, bool on, uint16_t color)
+{
+  if (on)
+  {
+    fill_hbar_pointed(x, y, len, thick, color);
+    return;
+  }
+  fill_rect(x, y, len, thick, LCD_COLOR_BLACK);
+  outline_hbar_pointed(x, y, len, thick, LCD_COLOR_DARKGREY);
+}
+
+static void draw_segment_v(int x, int y, int len, int thick, bool on, uint16_t color)
+{
+  if (on)
+  {
+    fill_vbar_pointed(x, y, len, thick, color);
+    return;
+  }
+  fill_rect(x, y, thick, len, LCD_COLOR_BLACK);
+  outline_vbar_pointed(x, y, len, thick, LCD_COLOR_DARKGREY);
+}
+
+static void draw_segment_digit(int x, int y, int digit, uint16_t color)
 {
   const int w = 68, h = 116, t = 11;
   uint8_t m = (digit >= 0 && digit <= 9) ? seg_map[digit] : 0;
-  // a,b,c,d,e,f,g
-  fill_rect(x + t, y, w - 2 * t, t, (m & 0x01) ? color : off);
-  fill_rect(x + w - t, y + t, t, h / 2 - t, (m & 0x02) ? color : off);
-  fill_rect(x + w - t, y + h / 2, t, h / 2 - t, (m & 0x04) ? color : off);
-  fill_rect(x + t, y + h - t, w - 2 * t, t, (m & 0x08) ? color : off);
-  fill_rect(x, y + h / 2, t, h / 2 - t, (m & 0x10) ? color : off);
-  fill_rect(x, y + t, t, h / 2 - t, (m & 0x20) ? color : off);
-  fill_rect(x + t, y + h / 2 - t / 2, w - 2 * t, t, (m & 0x40) ? color : off);
+  // a (top), shifted 2px down
+  draw_segment_h(x + t, y + 2, w - 2 * t, t, m & 0x01, color);
+  // b (top-right)
+  draw_segment_v(x + w - t, y + t, h / 2 - t, t, m & 0x02, color);
+  // c (bottom-right)
+  draw_segment_v(x + w - t, y + h / 2, h / 2 - t, t, m & 0x04, color);
+  // d (bottom), shifted 2px up
+  draw_segment_h(x + t, y + h - t - 2, w - 2 * t, t, m & 0x08, color);
+  // e (bottom-left)
+  draw_segment_v(x, y + h / 2, h / 2 - t, t, m & 0x10, color);
+  // f (top-left)
+  draw_segment_v(x, y + t, h / 2 - t, t, m & 0x20, color);
+  // g (middle)
+  draw_segment_h(x + t, y + h / 2 - t / 2, w - 2 * t, t, m & 0x40, color);
+}
+
+static void fill_circle(int cx, int cy, int radius, uint16_t color)
+{
+  for (int dy = -radius; dy <= radius; ++dy)
+  {
+    int dx = (int)lroundf(sqrtf((float)(radius * radius - dy * dy)));
+    fill_rect(cx - dx, cy + dy, 2 * dx + 1, 1, color);
+  }
+}
+
+//-- Thin 1px ring so an "off" dot reads the same way as an "off" segment.
+static void draw_circle_outline(int cx, int cy, int radius, uint16_t color)
+{
+  int inner = radius - 1;
+  if (inner < 0)
+    inner = 0;
+  for (int dy = -radius; dy <= radius; ++dy)
+  {
+    int outerDx = (int)lroundf(sqrtf((float)(radius * radius - dy * dy)));
+    int innerSq = inner * inner - dy * dy;
+    if (innerSq > 0)
+    {
+      int innerDx = (int)lroundf(sqrtf((float)innerSq));
+      fill_rect(cx - outerDx, cy + dy, outerDx - innerDx, 1, color);
+      fill_rect(cx + innerDx, cy + dy, outerDx - innerDx, 1, color);
+    }
+    else
+    {
+      fill_rect(cx - outerDx, cy + dy, 2 * outerDx + 1, 1, color);
+    }
+  }
+}
+
+static void draw_dot(int cx, int cy, int radius, bool on, uint16_t color)
+{
+  if (on)
+  {
+    fill_circle(cx, cy, radius, color);
+    return;
+  }
+  fill_circle(cx, cy, radius, LCD_COLOR_BLACK);
+  draw_circle_outline(cx, cy, radius, LCD_COLOR_DARKGREY);
 }
 
 //-- decimal_after: -1 = no decimal point, 0 = point after digit0, 1 = point after digit1.
-//-- Outer digits are nudged outward and the dots re-centered in the widened
-//-- gaps so each dot sits loose from both of its neighboring digits.
+//-- The outer digits sit `gap` pixels from the fixed middle digit (more than a
+//-- bare seven-segment digit needs) and each round dot is centered in its gap.
 static void draw_large_digits(int digit0, int digit1, int digit2, int decimal_after, uint16_t color)
 {
-  const int digit0_x = 35;
+  const int w = 68;
+  const int t = 11;
+  const int gap = 32;
   const int digit1_x = 126;
-  const int digit2_x = 217;
-  const int dot0_x = 109;
-  const int dot1_x = 200;
+  const int digit0_x = digit1_x - w - gap;
+  const int digit2_x = digit1_x + w + gap;
   const int y0 = 52;
   const int h = 116;
-  const int dot_size = 11;
-  uint16_t off = 0x1082;
+  const int dot_radius = 6;
+  const int dot_y = y0 + h - t / 2;
+  const int dot0_x = (digit0_x + w + digit1_x) / 2;
+  const int dot1_x = (digit1_x + w + digit2_x) / 2;
 
-  draw_segment_digit(digit0_x, y0, digit0, color, off);
-  draw_segment_digit(digit1_x, y0, digit1, color, off);
-  draw_segment_digit(digit2_x, y0, digit2, color, off);
+  draw_segment_digit(digit0_x, y0, digit0, color);
+  draw_segment_digit(digit1_x, y0, digit1, color);
+  draw_segment_digit(digit2_x, y0, digit2, color);
 
-  int dot_y = y0 + h - dot_size;
-  fill_rect(dot0_x, dot_y, dot_size, dot_size, decimal_after == 0 ? color : off);
-  fill_rect(dot1_x, dot_y, dot_size, dot_size, decimal_after == 1 ? color : off);
+  draw_dot(dot0_x, dot_y, dot_radius, decimal_after == 0, color);
+  draw_dot(dot1_x, dot_y, dot_radius, decimal_after == 1, color);
 }
 
 //-- Splits a value into 3 seven-segment digits, sliding the decimal point so the
