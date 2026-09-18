@@ -320,30 +320,6 @@ static void fill_hbar_pointed(int x, int y, int len, int thick, uint16_t color)
   }
 }
 
-//-- Same hexagon shape as fill_hbar_pointed(), but only the 1px boundary:
-//-- flat lines on the top/bottom rows, single diagonal pixels elsewhere.
-static void outline_hbar_pointed(int x, int y, int len, int thick, uint16_t color)
-{
-  int half = thick / 2;
-  for (int r = 0; r < thick; ++r)
-  {
-    int diff = r - half;
-    int inset = diff < 0 ? -diff : diff;
-    int width = len - 2 * inset;
-    if (width <= 0)
-      continue;
-    if (r == 0 || r == thick - 1)
-    {
-      fill_rect(x + inset, y + r, width, 1, color);
-    }
-    else
-    {
-      fill_rect(x + inset, y + r, 1, 1, color);
-      fill_rect(x + inset + width - 1, y + r, 1, 1, color);
-    }
-  }
-}
-
 //-- Vertical counterpart of fill_hbar_pointed(): flat left/right sides,
 //-- points at the top and bottom ends.
 static void fill_vbar_pointed(int x, int y, int len, int thick, uint16_t color)
@@ -359,31 +335,9 @@ static void fill_vbar_pointed(int x, int y, int len, int thick, uint16_t color)
   }
 }
 
-static void outline_vbar_pointed(int x, int y, int len, int thick, uint16_t color)
-{
-  int half = thick / 2;
-  for (int c = 0; c < thick; ++c)
-  {
-    int diff = c - half;
-    int inset = diff < 0 ? -diff : diff;
-    int height = len - 2 * inset;
-    if (height <= 0)
-      continue;
-    if (c == 0 || c == thick - 1)
-    {
-      fill_rect(x + c, y + inset, 1, height, color);
-    }
-    else
-    {
-      fill_rect(x + c, y + inset, 1, 1, color);
-      fill_rect(x + c, y + inset + height - 1, 1, 1, color);
-    }
-  }
-}
-
-//-- An "off" segment is never left as leftover pixels from a previous digit:
-//-- its bounding box is cleared to black first, then given a thin light-grey
-//-- outline tracing the same pointed-hexagon shape as the "on" fill.
+//-- An "off" segment is not drawn at all (no outline); its bounding box is
+//-- still cleared to black so it never keeps leftover "on" pixels from a
+//-- previous digit, since digit redraws happen without a full-area clear.
 static void draw_segment_h(int x, int y, int len, int thick, bool on, uint16_t color)
 {
   if (on)
@@ -392,7 +346,6 @@ static void draw_segment_h(int x, int y, int len, int thick, bool on, uint16_t c
     return;
   }
   fill_rect(x, y, len, thick, LCD_COLOR_BLACK);
-  outline_hbar_pointed(x, y, len, thick, LCD_COLOR_DARKGREY);
 }
 
 static void draw_segment_v(int x, int y, int len, int thick, bool on, uint16_t color)
@@ -403,21 +356,20 @@ static void draw_segment_v(int x, int y, int len, int thick, bool on, uint16_t c
     return;
   }
   fill_rect(x, y, thick, len, LCD_COLOR_BLACK);
-  outline_vbar_pointed(x, y, len, thick, LCD_COLOR_DARKGREY);
 }
 
 static void draw_segment_digit(int x, int y, int digit, uint16_t color)
 {
   const int w = 68, h = 116, t = 11;
   uint8_t m = (digit >= 0 && digit <= 9) ? seg_map[digit] : 0;
-  // a (top), shifted 2px down
-  draw_segment_h(x + t, y + 2, w - 2 * t, t, m & 0x01, color);
+  // a (top), shifted 2px down, 1px wider on each side
+  draw_segment_h(x + t - 1, y + 2, w - 2 * t + 2, t, m & 0x01, color);
   // b (top-right)
   draw_segment_v(x + w - t, y + t, h / 2 - t, t, m & 0x02, color);
   // c (bottom-right)
   draw_segment_v(x + w - t, y + h / 2, h / 2 - t, t, m & 0x04, color);
-  // d (bottom), shifted 2px up
-  draw_segment_h(x + t, y + h - t - 2, w - 2 * t, t, m & 0x08, color);
+  // d (bottom), shifted 2px up, 1px wider on each side
+  draw_segment_h(x + t - 1, y + h - t - 2, w - 2 * t + 2, t, m & 0x08, color);
   // e (bottom-left)
   draw_segment_v(x, y + h / 2, h / 2 - t, t, m & 0x10, color);
   // f (top-left)
@@ -466,7 +418,7 @@ static void draw_dot(int cx, int cy, int radius, bool on, uint16_t color)
     return;
   }
   fill_circle(cx, cy, radius, LCD_COLOR_BLACK);
-  draw_circle_outline(cx, cy, radius, LCD_COLOR_DARKGREY);
+  draw_circle_outline(cx, cy, radius - 2, LCD_COLOR_DARKGREY);
 }
 
 //-- decimal_after: -1 = no decimal point, 0 = point after digit0, 1 = point after digit1.
