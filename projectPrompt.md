@@ -154,11 +154,21 @@ GPS processing and GPX logging are separate responsibilities. Preserve these inv
 
 - Continue parsing and processing every valid GPS update at approximately 10 Hz. Do not reduce GPS acquisition, parsing, speed filtering, position processing, or fix handling to 1 Hz.
 - Use the GNSS receiver's Speed Over Ground from RMC as the vehicle speed. Do not calculate displayed speed from coordinate distance divided by elapsed time, and do not add a calibration factor to match the vehicle speedometer.
-- Apply the speed filter to every valid sample using `filteredSpeed += 0.25 * (rawGpsSpeed - filteredSpeed)`. Keep full precision internally and round only for display formatting. Initialize the filter directly from the first valid sample and reinitialize it after fix loss when required.
-- Use stationary hysteresis based on GPS SOG: enter stationary below 2.0 km/h for 3 seconds and leave stationary above 3.0 km/h for 1 second. While stationary, display exactly 0 km/h and do not add position jitter to trip or total distance. Rebase any movement reference when leaving stationary mode so stationary displacement is never added later.
-- If GPS fixes become invalid or stale, do not leave an old speed displayed indefinitely; mark the fix invalid and clear the displayed speed.
-- The display may update independently from GPS acquisition. GPX logging must use a separate timer and write at most one trackpoint per second from the latest valid fix. Never write a trackpoint directly for every received GPS update, and do not solve duplicate timestamps by merely suppressing them after writing.
-- Temporary GPS diagnostics may log approximately once per second: raw speed, filtered speed, displayed speed, stationary/moving state, fix validity, and the number of GPS speed samples received during the preceding second. Diagnostics must not affect timing or processing.
+- The speedometer is a GPS reference display, not a calibrated vehicle speedometer. If GPS reports 91.2 km/h while the vehicle speedometer indicates 95 km/h, display 91.2 km/h.
+- Use a rolling GNSS sample buffer covering roughly 3 seconds of valid SOG samples. Do not assume exactly 10 Hz; use sample timestamps where appropriate.
+- Reject outliers before filtering by computing a robust median-based speed estimate from recent samples and rejecting spikes inconsistent with normal vehicle acceleration or braking.
+- Maintain separate `instant_speed_kmh` and `reference_speed_kmh` values. `reference_speed_kmh` is the primary display value and must be based on multiple SOG samples, not a single sample.
+- Use adaptive filtering rather than a single fixed alpha across the full 3–150 km/h range. Use lower smoothing at low speeds and progressively stronger filtering at higher cruising speeds.
+- Detect a stable-speed condition over the recent 2–3 second window. When the robust GNSS speed estimates have low spread and no consistent acceleration/deceleration trend, set `speed_stable = true` and apply stronger smoothing to `reference_speed_kmh`.
+- Do not interpret every small speed change as acceleration. Distinguish random GNSS noise from real acceleration/deceleration.
+- Completely redesign stationary detection to work from the recent sample window instead of requiring every raw sample to remain continuously below threshold. Use a median-based and ratio-based check so occasional noise does not keep the display awake or keep the display from reaching 0 km/h promptly.
+- When stationary is detected, set `stationary = true`, force `instant_speed_kmh = 0`, `reference_speed_kmh = 0`, and `display_speed_kmh = 0`, and reset the speed filters. Do not allow an old filtered value to decay slowly toward zero.
+- When leaving stationary mode, require convincing movement above the moving threshold and reinitialize the filter from the current robust GNSS speed estimate.
+- Preserve existing stale-GPS protection. If valid GPS speed updates stop, the old speed must never remain indefinitely on screen.
+- The primary speedometer display must show `reference_speed_kmh` and keep at least 0.1 km/h internal or display resolution when the UI has enough space.
+- Diagnostics may log approximately once per second: raw GNSS SOG, median/robust speed, instant speed, reference speed, displayed speed, stationary/moving state, stable/not-stable state, number of GNSS samples, and satellites/fix status. Diagnostics must not affect timing or processing.
+- Preserve the separation between display speed filtering and GPX logging frequency. Continue processing every valid GNSS update even if one GPX trackpoint per second is stored.
+- The current source code is the authoritative implementation. Any documentation or later notes that disagree with the actual implementation must be treated as non-authoritative, and the code remains the final truth.
 
 ## SD Card GPS Export
 

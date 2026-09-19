@@ -7,13 +7,22 @@
 typedef struct
 {
   float raw_speed_kmh;
+  float robust_speed_kmh;
+  float instant_speed_kmh;
+  float reference_speed_kmh;
   float filtered_speed_kmh;
   float display_speed_kmh;
   float trip_distance_m;
   float total_distance_m;
   bool gps_fix;
   bool stationary;
+  bool speed_stable;
   uint8_t satellites;
+
+  float sample_window[32];
+  float robust_window[24];
+  uint8_t sample_count;
+  uint8_t robust_count;
 
   bool trip_started;
   int64_t trip_start_us;
