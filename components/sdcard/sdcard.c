@@ -195,7 +195,7 @@ static void gps_utc_to_local(const gps_data_t* gps, uint16_t* out_year, uint8_t*
 }
 
 //-- Create both date-time-based trip filenames in the form trip-EEYYMMDD-HHmmSS.ext.
-static void build_trip_filenames(const gps_data_t* gps)
+static void build_trip_filenames(const gps_data_t* gps, unsigned filename_offset_seconds)
 {
   uint16_t local_year = gps->year;
   uint8_t local_month = gps->month;
@@ -209,12 +209,26 @@ static void build_trip_filenames(const gps_data_t* gps)
 
   //-- The "O" (open) marker right before ".gpx" marks a trip file that is
   //-- still being recorded; it is dropped only once the trip is properly closed.
+  setenv("TZ", "UTC", 1);
+  tzset();
+  struct tm local_tm = {0};
+  local_tm.tm_year = local_year - 1900;
+  local_tm.tm_mon = local_month - 1;
+  local_tm.tm_mday = local_day;
+  local_tm.tm_hour = local_hour;
+  local_tm.tm_min = local_minute;
+  local_tm.tm_sec = local_second;
+  time_t local_epoch = mktime(&local_tm) + (time_t)filename_offset_seconds;
+  gmtime_r(&local_epoch, &local_tm);
+
   snprintf(s_trip_gpx_path, sizeof(s_trip_gpx_path),
-           SD_MOUNT_POINT "/trip-%04d%02d%02d-%02d%02d%02dO.gpx", (int)local_year, (int)local_month,
-           (int)local_day, (int)local_hour, (int)local_minute, (int)local_second);
+           SD_MOUNT_POINT "/trip-%04d%02d%02d-%02d%02d%02dO.gpx", local_tm.tm_year + 1900,
+           local_tm.tm_mon + 1, local_tm.tm_mday, local_tm.tm_hour, local_tm.tm_min,
+           local_tm.tm_sec);
   snprintf(s_trip_csv_path, sizeof(s_trip_csv_path),
-           SD_MOUNT_POINT "/trip-%04d%02d%02d-%02d%02d%02d.csv", (int)local_year, (int)local_month,
-           (int)local_day, (int)local_hour, (int)local_minute, (int)local_second);
+           SD_MOUNT_POINT "/trip-%04d%02d%02d-%02d%02d%02d.csv", local_tm.tm_year + 1900,
+           local_tm.tm_mon + 1, local_tm.tm_mday, local_tm.tm_hour, local_tm.tm_min,
+           local_tm.tm_sec);
 }
 
 //-- Calculate distance in meters between two lat/lon coordinates using the Haversine formula.
@@ -333,6 +347,12 @@ static esp_err_t rename_gpx_remove_open_marker(const char* open_path, char* clos
     return ESP_OK;
   }
   snprintf(closed_path, closed_path_size, "%.*s.gpx", (int)(length - 5), open_path);
+  if (access(closed_path, F_OK) == 0)
+  {
+    ESP_LOGE(TAG, "Refusing to replace existing closed GPX %s", closed_path);
+    snprintf(closed_path, closed_path_size, "%s", open_path);
+    return ESP_FAIL;
+  }
   ESP_LOGI(TAG, "rename(\"%s\", \"%s\")", open_path, closed_path);
   if (rename(open_path, closed_path) != 0)
   {
@@ -611,8 +631,28 @@ static esp_err_t recover_active_trip(void)
     return ESP_ERR_INVALID_ARG;
   }
 
-  snprintf(s_trip_csv_path, sizeof(s_trip_csv_path), "%.*s.csv", (int)(path_length - 4),
+  size_t csv_base_length = path_length - 4;
+  if (csv_base_length > 0 && s_trip_gpx_path[csv_base_length - 1] == 'O')
+  {
+    --csv_base_length;
+  }
+  snprintf(s_trip_csv_path, sizeof(s_trip_csv_path), "%.*s.csv", (int)csv_base_length,
            s_trip_gpx_path);
+
+  char legacy_csv_path[sizeof(s_trip_csv_path)];
+  snprintf(legacy_csv_path, sizeof(legacy_csv_path), "%.*s.csv", (int)(path_length - 4),
+           s_trip_gpx_path);
+  if (strcmp(legacy_csv_path, s_trip_csv_path) != 0 && access(s_trip_csv_path, F_OK) != 0 &&
+      access(legacy_csv_path, F_OK) == 0)
+  {
+    if (rename(legacy_csv_path, s_trip_csv_path) != 0)
+    {
+      ESP_LOGE(TAG, "Cannot repair active CSV name %s -> %s, errno=%d", legacy_csv_path,
+               s_trip_csv_path, errno);
+      return ESP_FAIL;
+    }
+    ESP_LOGW(TAG, "Repaired active CSV name %s -> %s", legacy_csv_path, s_trip_csv_path);
+  }
 
   int file = open(s_trip_gpx_path, O_RDWR);
   if (file < 0)
@@ -710,7 +750,9 @@ esp_err_t sdcard_remove_small_trip_files(void)
   esp_err_t result = ESP_OK;
   while ((entry = readdir(directory)) != NULL)
   {
-    if (!is_trip_filename(entry->d_name))
+    size_t name_length = strlen(entry->d_name);
+    if (!is_trip_filename(entry->d_name) || name_length < 4 ||
+        strcmp(entry->d_name + name_length - 4, ".gpx") != 0)
     {
       continue;
     }
@@ -723,6 +765,11 @@ esp_err_t sdcard_remove_small_trip_files(void)
       continue;
     }
 
+    if (s_trip_gpx_fd >= 0 && strcmp(path, s_trip_gpx_path) == 0)
+    {
+      continue;
+    }
+
     bool small_file;
 #if SDCARD_KEEP_SMALL_TRIP_FILES
     //-- The result is discarded below anyway while this debug switch is on;
@@ -730,8 +777,10 @@ esp_err_t sdcard_remove_small_trip_files(void)
     //-- file's content on every [Start Webserver] entry.
     small_file = false;
 #else
-    bool gpx = strcmp(path + strlen(path) - 4, ".gpx") == 0;
-    small_file = count_trip_entries(path, gpx) < 20;
+    char csv_path[sizeof(s_trip_csv_path)];
+    snprintf(csv_path, sizeof(csv_path), "%.*s.csv", written - 4, path);
+    small_file = access(csv_path, F_OK) == 0 && count_trip_entries(path, true) < 20 &&
+                 count_trip_entries(csv_path, false) < 20;
 #endif
     if (small_file && remove(path) != 0)
     {
@@ -742,6 +791,13 @@ esp_err_t sdcard_remove_small_trip_files(void)
     {
       report_status("Removing empty tripFile:");
       report_success("%s", entry->d_name);
+      char csv_path[sizeof(s_trip_csv_path)];
+      snprintf(csv_path, sizeof(csv_path), "%.*s.csv", written - 4, path);
+      if (remove(csv_path) != 0)
+      {
+        ESP_LOGW(TAG, "Cannot delete matching CSV file %s, errno=%d", csv_path, errno);
+        result = ESP_FAIL;
+      }
     }
   }
   closedir(directory);
@@ -815,6 +871,11 @@ esp_err_t sdcard_remove_undersized_trip_files(size_t min_gpx_bytes)
 
     char csv_path[sizeof(s_trip_csv_path)];
     snprintf(csv_path, sizeof(csv_path), "%.*s.csv", written - 4, gpx_path);
+    if (access(csv_path, F_OK) != 0)
+    {
+      ESP_LOGW(TAG, "Keeping undersized GPX without matching CSV: %s", gpx_path);
+      continue;
+    }
 
     if (remove(gpx_path) != 0)
     {
@@ -909,27 +970,56 @@ static esp_err_t create_trip_file(const gps_data_t* gps)
     s_waiting_for_gps_time = true;
     return ESP_ERR_INVALID_STATE;
   }
-  build_trip_filenames(gps);
-  if (s_waiting_for_new_filename && strcmp(s_trip_gpx_path, s_closed_gpx_path) == 0)
+  int new_gpx_fd = -1;
+  int new_csv_fd = -1;
+  bool files_created = false;
+  for (unsigned filename_offset_seconds = 0; filename_offset_seconds < 86400;
+       ++filename_offset_seconds)
   {
-    s_waiting_for_gps_time = true;
-    return ESP_ERR_INVALID_STATE;
-  }
-  s_waiting_for_new_filename = false;
+    build_trip_filenames(gps, filename_offset_seconds);
+    if (s_waiting_for_new_filename && strcmp(s_trip_gpx_path, s_closed_gpx_path) == 0)
+    {
+      continue;
+    }
 
-  //-- The GPX descriptor must stay readable: remove_gpx_closing_tags() reads the
-  //-- current tail of the file before every write to locate and strip the
-  //-- closing tags, which fails with EBADF on an O_WRONLY descriptor.
-  s_trip_gpx_fd = open(s_trip_gpx_path, O_RDWR | O_CREAT | O_TRUNC | O_APPEND, 0666);
-  s_trip_csv_fd = open(s_trip_csv_path, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0666);
-  if (s_trip_gpx_fd < 0 || s_trip_csv_fd < 0)
+    new_gpx_fd = open(s_trip_gpx_path, O_RDWR | O_CREAT | O_EXCL | O_APPEND, 0666);
+    if (new_gpx_fd < 0)
+    {
+      if (errno == EEXIST)
+      {
+        continue;
+      }
+      break;
+    }
+
+    new_csv_fd = open(s_trip_csv_path, O_WRONLY | O_CREAT | O_EXCL | O_APPEND, 0666);
+    if (new_csv_fd < 0)
+    {
+      int saved_errno = errno;
+      close(new_gpx_fd);
+      new_gpx_fd = -1;
+      remove(s_trip_gpx_path);
+      if (saved_errno == EEXIST)
+      {
+        continue;
+      }
+      errno = saved_errno;
+      break;
+    }
+    files_created = true;
+    break;
+  }
+
+  if (!files_created)
   {
-    ESP_LOGE(TAG, "Cannot create GPX/CSV trip files");
-    close_trip_files();
-    remove(s_trip_gpx_path);
-    remove(s_trip_csv_path);
+    ESP_LOGE(TAG, "Cannot create unique GPX/CSV trip files, errno=%d", errno);
     return ESP_FAIL;
   }
+
+  s_trip_gpx_fd = new_gpx_fd;
+  s_trip_csv_fd = new_csv_fd;
+  s_waiting_for_new_filename = false;
+
   if (write_text(s_trip_gpx_fd, s_trip_gpx_path,
                  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
                  "<gpx version=\"1.1\" creator=\"tripTracker\" "
@@ -1239,7 +1329,7 @@ size_t sdcard_list_trip_files(sdcard_trip_summary_t* out, size_t max_count)
 
   size_t count = 0;
   struct dirent* entry;
-  while (count < max_count && (entry = readdir(directory)) != NULL)
+  while ((entry = readdir(directory)) != NULL)
   {
     size_t name_length = strlen(entry->d_name);
     if (!is_trip_filename(entry->d_name) || strcmp(entry->d_name + name_length - 4, ".gpx") != 0)
@@ -1247,8 +1337,17 @@ size_t sdcard_list_trip_files(sdcard_trip_summary_t* out, size_t max_count)
       continue;
     }
 
+    const char* summary_name = entry->d_name;
+    char normalized_name[sizeof(s_trip_gpx_path)];
+    if (name_length >= 5 && strcmp(entry->d_name + name_length - 5, "O.gpx") == 0)
+    {
+      snprintf(normalized_name, sizeof(normalized_name), "%.*s.gpx", (int)(name_length - 5),
+               entry->d_name);
+      summary_name = normalized_name;
+    }
+
     sdcard_trip_summary_t summary = {0};
-    if (!parse_trip_filename(entry->d_name, &summary))
+    if (!parse_trip_filename(summary_name, &summary))
     {
       continue;
     }
@@ -1269,14 +1368,22 @@ size_t sdcard_list_trip_files(sdcard_trip_summary_t* out, size_t max_count)
       summary.distance_m = read_trip_gpx_last_distance(path);
     }
 
-    snprintf(summary.base_name, sizeof(summary.base_name), "%.*s", (int)(name_length - 4),
-             entry->d_name);
+    size_t base_name_length = strlen(summary_name) - 4;
+    snprintf(summary.base_name, sizeof(summary.base_name), "%.*s", (int)base_name_length,
+             summary_name);
 
-    out[count++] = summary;
+    if (count < max_count)
+    {
+      out[count++] = summary;
+    }
+    else if (compare_trip_summary_desc(&summary, &out[count - 1]) < 0)
+    {
+      out[count - 1] = summary;
+    }
+    qsort(out, count, sizeof(sdcard_trip_summary_t), compare_trip_summary_desc);
   }
   closedir(directory);
 
-  qsort(out, count, sizeof(sdcard_trip_summary_t), compare_trip_summary_desc);
   return count;
 }
 
