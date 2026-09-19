@@ -114,104 +114,75 @@ static bool has_suffix(const char* name, const char* suffix)
   return strcmp(name + (name_len - suffix_len), suffix) == 0;
 }
 
-static bool parse_trip_timestamp(const char* date, const char* time, struct tm* timestamp)
+static bool read_trip_web_summary(const char* path, float* distance_m, float* avg_speed_kmh)
 {
-  int year;
-  int month;
-  int day;
-  int hour;
-  int minute;
-  int second;
-  if (sscanf(date, "%d-%d-%d", &year, &month, &day) != 3 ||
-      sscanf(time, "%d:%d:%d", &hour, &minute, &second) != 3)
-  {
-    return false;
-  }
-
-  memset(timestamp, 0, sizeof(*timestamp));
-  timestamp->tm_year = year - 1900;
-  timestamp->tm_mon = month - 1;
-  timestamp->tm_mday = day;
-  timestamp->tm_hour = hour;
-  timestamp->tm_min = minute;
-  timestamp->tm_sec = second;
-  return true;
-}
-
-static bool read_trip_web_summary(const char* base_name, float* distance_m, float* avg_speed_kmh)
-{
-  char path[80];
-  if (snprintf(path, sizeof(path), SDCARD_MOUNT_POINT "/%s.csv", base_name) >= sizeof(path))
-  {
-    return false;
-  }
-
   FILE* file = fopen(path, "r");
   if (!file)
   {
     return false;
   }
 
-  char first_row[256];
-  char tail[512];
-  if (!fgets(first_row, sizeof(first_row), file) || !fgets(first_row, sizeof(first_row), file) ||
-      fseek(file, 0, SEEK_END) != 0)
+  char line[512];
+  char first_time[32] = {0};
+  char last_time[32] = {0};
+  float last_distance = 0.0f;
+  bool found_trackpoint = false;
+  while (fgets(line, sizeof(line), file))
   {
-    fclose(file);
-    return false;
-  }
+    char* time_start = strstr(line, "<time>");
+    char* time_end = time_start ? strstr(time_start, "</time>") : NULL;
+    char* distance_start = strstr(line, "<distance_m>");
+    if (!time_start || !time_end || !distance_start)
+    {
+      continue;
+    }
 
-  long file_size = ftell(file);
-  long tail_offset =
-      file_size > (long)(sizeof(tail) - 1) ? file_size - (long)(sizeof(tail) - 1) : 0;
-  if (file_size <= 0 || fseek(file, tail_offset, SEEK_SET) != 0)
-  {
-    fclose(file);
-    return false;
+    time_start += strlen("<time>");
+    size_t time_length = (size_t)(time_end - time_start);
+    if (time_length >= sizeof(first_time))
+    {
+      continue;
+    }
+
+    char* distance_end;
+    float distance = strtof(distance_start + strlen("<distance_m>"), &distance_end);
+    if (distance_end == distance_start + strlen("<distance_m>"))
+    {
+      continue;
+    }
+
+    if (!found_trackpoint)
+    {
+      memcpy(first_time, time_start, time_length);
+      first_time[time_length] = '\0';
+      found_trackpoint = true;
+    }
+    memcpy(last_time, time_start, time_length);
+    last_time[time_length] = '\0';
+    last_distance = distance;
   }
-  size_t tail_length = fread(tail, 1, sizeof(tail) - 1, file);
   fclose(file);
-  tail[tail_length] = '\0';
 
-  char* last_row = tail + tail_length;
-  while (last_row > tail && (last_row[-1] == '\n' || last_row[-1] == '\r'))
-  {
-    *--last_row = '\0';
-  }
-  while (last_row > tail && last_row[-1] != '\n')
-  {
-    --last_row;
-  }
-
-  char first_date[16];
-  char first_time[16];
-  char last_date[16];
-  char last_time[16];
-  if (sscanf(first_row, "%15[^,],%15[^,]", first_date, first_time) != 2 ||
-      sscanf(last_row, "%15[^,],%15[^,]", last_date, last_time) != 2)
+  if (!found_trackpoint)
   {
     return false;
   }
 
-  char* last_comma = strrchr(last_row, ',');
-  if (!last_comma)
+  struct tm first_timestamp = {0};
+  struct tm last_timestamp = {0};
+  if (sscanf(first_time, "%d-%d-%dT%d:%d:%dZ", &first_timestamp.tm_year, &first_timestamp.tm_mon,
+             &first_timestamp.tm_mday, &first_timestamp.tm_hour, &first_timestamp.tm_min,
+             &first_timestamp.tm_sec) != 6 ||
+      sscanf(last_time, "%d-%d-%dT%d:%d:%dZ", &last_timestamp.tm_year, &last_timestamp.tm_mon,
+             &last_timestamp.tm_mday, &last_timestamp.tm_hour, &last_timestamp.tm_min,
+             &last_timestamp.tm_sec) != 6)
   {
     return false;
   }
-  char* distance_end;
-  float last_distance = strtof(last_comma + 1, &distance_end);
-  if (distance_end == last_comma + 1)
-  {
-    return false;
-  }
-
-  struct tm first_timestamp;
-  struct tm last_timestamp;
-  if (!parse_trip_timestamp(first_date, first_time, &first_timestamp) ||
-      !parse_trip_timestamp(last_date, last_time, &last_timestamp))
-  {
-    return false;
-  }
+  first_timestamp.tm_year -= 1900;
+  first_timestamp.tm_mon -= 1;
+  last_timestamp.tm_year -= 1900;
+  last_timestamp.tm_mon -= 1;
   int64_t duration_s = (int64_t)mktime(&last_timestamp) - (int64_t)mktime(&first_timestamp);
   if (duration_s < 0)
   {
@@ -275,16 +246,7 @@ static esp_err_t handle_list(httpd_req_t* req)
     //-- Trip distance/average speed are only available for SD-card GPX trip files.
     if (strcmp(base_path, SDCARD_MOUNT_POINT) == 0 && has_suffix(out->name, ".gpx"))
     {
-      char base_name[32];
-      size_t base_len = strlen(out->name) - 4;
-      if (base_len >= sizeof(base_name))
-      {
-        base_len = sizeof(base_name) - 1;
-      }
-      memcpy(base_name, out->name, base_len);
-      base_name[base_len] = '\0';
-
-      if (read_trip_web_summary(base_name, &out->distance_m, &out->avg_speed_kmh))
+      if (read_trip_web_summary(full_path, &out->distance_m, &out->avg_speed_kmh))
       {
         out->has_trip_data = true;
       }
