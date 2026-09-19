@@ -41,7 +41,7 @@ function formatSpeed(kmh)
 
 function refreshFileList()
 {
-  fetch("/api/files?store=" + currentStore())
+  fetch("/api/files?store=" + currentStore() + "&refresh=" + Date.now(), { cache: "no-store" })
     .then(function (response) { return response.json(); })
     .then(function (files)
     {

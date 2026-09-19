@@ -114,6 +114,116 @@ static bool has_suffix(const char* name, const char* suffix)
   return strcmp(name + (name_len - suffix_len), suffix) == 0;
 }
 
+static bool parse_trip_timestamp(const char* date, const char* time, struct tm* timestamp)
+{
+  int year;
+  int month;
+  int day;
+  int hour;
+  int minute;
+  int second;
+  if (sscanf(date, "%d-%d-%d", &year, &month, &day) != 3 ||
+      sscanf(time, "%d:%d:%d", &hour, &minute, &second) != 3)
+  {
+    return false;
+  }
+
+  memset(timestamp, 0, sizeof(*timestamp));
+  timestamp->tm_year = year - 1900;
+  timestamp->tm_mon = month - 1;
+  timestamp->tm_mday = day;
+  timestamp->tm_hour = hour;
+  timestamp->tm_min = minute;
+  timestamp->tm_sec = second;
+  return true;
+}
+
+static bool read_trip_web_summary(const char* base_name, float* distance_m, float* avg_speed_kmh)
+{
+  char path[80];
+  if (snprintf(path, sizeof(path), SDCARD_MOUNT_POINT "/%s.csv", base_name) >= sizeof(path))
+  {
+    return false;
+  }
+
+  FILE* file = fopen(path, "r");
+  if (!file)
+  {
+    return false;
+  }
+
+  char first_row[256];
+  char tail[512];
+  if (!fgets(first_row, sizeof(first_row), file) || !fgets(first_row, sizeof(first_row), file) ||
+      fseek(file, 0, SEEK_END) != 0)
+  {
+    fclose(file);
+    return false;
+  }
+
+  long file_size = ftell(file);
+  long tail_offset =
+      file_size > (long)(sizeof(tail) - 1) ? file_size - (long)(sizeof(tail) - 1) : 0;
+  if (file_size <= 0 || fseek(file, tail_offset, SEEK_SET) != 0)
+  {
+    fclose(file);
+    return false;
+  }
+  size_t tail_length = fread(tail, 1, sizeof(tail) - 1, file);
+  fclose(file);
+  tail[tail_length] = '\0';
+
+  char* last_row = tail + tail_length;
+  while (last_row > tail && (last_row[-1] == '\n' || last_row[-1] == '\r'))
+  {
+    *--last_row = '\0';
+  }
+  while (last_row > tail && last_row[-1] != '\n')
+  {
+    --last_row;
+  }
+
+  char first_date[16];
+  char first_time[16];
+  char last_date[16];
+  char last_time[16];
+  if (sscanf(first_row, "%15[^,],%15[^,]", first_date, first_time) != 2 ||
+      sscanf(last_row, "%15[^,],%15[^,]", last_date, last_time) != 2)
+  {
+    return false;
+  }
+
+  char* last_comma = strrchr(last_row, ',');
+  if (!last_comma)
+  {
+    return false;
+  }
+  char* distance_end;
+  float last_distance = strtof(last_comma + 1, &distance_end);
+  if (distance_end == last_comma + 1)
+  {
+    return false;
+  }
+
+  struct tm first_timestamp;
+  struct tm last_timestamp;
+  if (!parse_trip_timestamp(first_date, first_time, &first_timestamp) ||
+      !parse_trip_timestamp(last_date, last_time, &last_timestamp))
+  {
+    return false;
+  }
+  int64_t duration_s = (int64_t)mktime(&last_timestamp) - (int64_t)mktime(&first_timestamp);
+  if (duration_s < 0)
+  {
+    duration_s = 0;
+  }
+
+  *distance_m = last_distance;
+  *avg_speed_kmh =
+      duration_s > 0 ? (last_distance / 1000.0f) / ((float)duration_s / 3600.0f) : 0.0f;
+  return true;
+}
+
 static esp_err_t handle_list(httpd_req_t* req)
 {
   char store_value[8];
@@ -174,12 +284,9 @@ static esp_err_t handle_list(httpd_req_t* req)
       memcpy(base_name, out->name, base_len);
       base_name[base_len] = '\0';
 
-      sdcard_trip_details_t details;
-      if (sdcard_get_trip_details(base_name, &details) == ESP_OK && details.valid)
+      if (read_trip_web_summary(base_name, &out->distance_m, &out->avg_speed_kmh))
       {
         out->has_trip_data = true;
-        out->distance_m = details.distance_m;
-        out->avg_speed_kmh = details.avg_speed_kmh;
       }
     }
 
@@ -209,6 +316,7 @@ static esp_err_t handle_list(httpd_req_t* req)
   cJSON_Delete(array);
 
   httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   httpd_resp_sendstr(req, json_text);
   free(json_text);
   return ESP_OK;

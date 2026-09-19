@@ -820,18 +820,31 @@ void lcd_render(const lcd_view_t* v)
         s_prev.wifi_log_count != v->wifi_log_count ||
         memcmp(s_prev.wifi_log_lines, v->wifi_log_lines, sizeof(v->wifi_log_lines)) != 0 ||
         memcmp(s_prev.wifi_log_colors, v->wifi_log_colors, sizeof(v->wifi_log_colors)) != 0;
-    if (full || s_prev.wifi_status != v->wifi_status || s_prev.system_menu || log_changed)
+    bool redraw_screen = full || s_prev.wifi_status != v->wifi_status || s_prev.system_menu;
+    if (redraw_screen)
     {
       fill_rect(0, 0, LCD_W, LCD_H, LCD_COLOR_BLACK);
       draw_header("Start Webserver", v->prog_version);
-      int y = 45;
-      for (uint8_t i = 0; i < v->wifi_log_count && i < LCD_WIFI_LOG_MAX_LINES; ++i)
+      draw_text(7, 211, "Long MidKey: Close", 2, LCD_COLOR_WHITE);
+    }
+    if (redraw_screen || log_changed)
+    {
+      uint8_t first_line = 0;
+      uint8_t last_line = v->wifi_log_count;
+      if (!redraw_screen && v->wifi_log_count > s_prev.wifi_log_count)
       {
+        first_line = s_prev.wifi_log_count;
+      }
+      for (uint8_t i = first_line; i < last_line && i < LCD_WIFI_LOG_MAX_LINES; ++i)
+      {
+        int y = 45 + i * 25;
+        if (!redraw_screen)
+        {
+          fill_rect(0, y - 2, LCD_W, 19, LCD_COLOR_BLACK);
+        }
         uint16_t color = v->wifi_log_colors[i] ? v->wifi_log_colors[i] : LCD_COLOR_YELLOW;
         draw_text_clipped(7, y, v->wifi_log_lines[i], 2, color, LCD_W - 7);
-        y += 25;
       }
-      draw_text(7, 211, "Long MidKey: Close", 2, LCD_COLOR_WHITE);
     }
     s_prev = *v;
     s_have_prev = true;
