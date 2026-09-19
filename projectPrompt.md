@@ -338,40 +338,62 @@ While the system menu is open, the normal application functions of all buttons a
 - Short Button B executes the function under the cursor.
 - Long Button B closes the system menu.
 
-The system menu currently has 7 items but only 6 fit on screen at once. When the
+The system menu currently has 8 items but only 6 fit on screen at once. When the
 cursor moves past the visible window, the menu scrolls so the cursor stays
 visible; moving the cursor back scrolls the window back accordingly.
 
 The menu options, in cursor order, are:
 
 1. `New Trip File`: resets the active trip and creates new GPX and CSV files named with the current GPS date-time in the `trip-EEYYMMDD-HHmmSS` format.
-2. `Show Used and Free`: shows the actual used and free SD-card space, auto-scaled to GB/MB/KB, on the `SD CARD INFO` Action screen.
+2. `Display Blackout`: an in-place toggle, not an Action screen. Each SHORT Button B press while this item is selected cycles the automatic display-blackout duration through `1 -> 2 -> 4 -> 8 -> 0` minutes (wrapping), shown live as `Display Blackout: <n> Min` or `Display Blackout: Never` for `0`. `0` means the display never blacks out automatically. The cursor stays on this item and the system menu stays open after each press.
 3. `Start Webserver`: enters `[Start Webserver]`.
-4. `Reset Tracker`: restarts the device (`esp_restart()`).
-5. `Format SDcard`: formats the SD card, creates a new GPX/CSV trip-file pair, and returns to the system menu after formatting succeeds.
-6. `List Trip Files`: opens `[List Trips]`, a scrollable list of all `.gpx` trip files showing date/time and total distance (right-aligned).
-7. `Exit`: closes the system menu.
+4. `Show Used and Free`: shows the actual used and free SD-card space, auto-scaled to GB/MB/KB, on the `SD CARD INFO` Action screen.
+5. `List Trip Files`: opens `[List Trips]`, a scrollable list of all `.gpx` trip files showing date/time and total distance (right-aligned).
+6. `Format SDcard`: opens the `[Format SDcard]` confirmation screen (see below) instead of formatting immediately.
+7. `Reset Tracker`: restarts the device (`esp_restart()`).
+8. `Exit`: closes the system menu.
+
+#### Format SDcard Confirmation
+
+Selecting `Format SDcard` does not format immediately; it opens a dedicated `[Format SDcard]` confirmation screen instead of the generic `Executing` Action screen flow:
+
+- The screen shows `Erase all SD card data?` with a `No` / `Yes` toggle. `No` is the default/highlighted choice when the screen opens.
+- Each SHORT Button B press toggles the highlighted choice between `No` and `Yes`.
+- A LONG Button B press confirms the currently highlighted choice: if `Yes` is highlighted, the SD card is formatted (`format_sdcard()`) and a new GPX/CSV trip-file pair is created, exactly as the previous immediate-format behavior did; if `No` is highlighted, formatting is cancelled. Either way, the system then returns to `[System Menu]`.
+- The footer shows `Short MidKey: Toggle` plus a second hint line that changes with the highlighted choice: `Long MidKey: Format now!` in red when `Yes` is highlighted, or `Long MidKey: Cancel` when `No` is highlighted.
+- Like other follow-up screens, this confirmation screen returns to the main screen after 60 seconds of inactivity (without formatting).
+
+#### Display Blackout Behavior
+
+The selected `Display Blackout` minutes value is the base automatic-blackout timeout applied on the main screen while the device is not charging (charging always disables the automatic timeout, independent of this setting). Battery level further adjusts the effective timeout:
+
+- Battery below 50%: the selected duration (except `0`/Never) is cut in half.
+- Battery below 25%: `0`/Never is treated as 1 minute instead of never blacking out. Non-zero durations are still only halved (not further reduced) below 25%.
+
+This automatic blackout is separate from the manual Short Button B backlight toggle on the main screen and from `g_display_forced_off`, which a manual toggle sets and which the automatic timeout does not override.
 
 ### System Menu And Start Webserver Appearance
 
 The `[System Menu]`, `[Start Webserver]`, `[List Trips]`, and the `Show Used and Free` / `New Trip File` action screens share the same header layout, drawn by the shared `draw_header()` helper in `components/lcd/lcd.c`:
 
 - The heading is drawn top-left at font scale 2 in cyan (`SYSTEM MENU` / `Start Webserver` / `List Trips` / `SD CARD INFO` / `NEW TRIP FILE`).
-- The firmware version string (`PROG_VERSION` from `main/app_main.c`, passed through `lcd_view_t.prog_version`) is drawn right-aligned at font scale 2 in white on the same header row. In `[System Menu]`, this is replaced by a `Wifi` (green) or `Ap-mode` (yellow) indicator only while WiFi is actually connected or running its AP fallback; the version shows otherwise. The remaining `Executing` action screens (`Start Webserver`, `Reset Tracker`, `Format SDcard`) also show the version top-right, without the rest of the shared header.
+- The firmware version string (`PROG_VERSION` from `main/app_main.c`, passed through `lcd_view_t.prog_version`) is drawn right-aligned at font scale 2 in white on the same header row. In `[System Menu]`, this is replaced by a `Wifi` (green) or `Ap-mode` (yellow) indicator only while WiFi is actually connected or running its AP fallback; the version shows otherwise. The remaining `Executing` action screen (`Reset Tracker`) also shows the version top-right, without the rest of the shared header.
 - A dark-grey 1px horizontal separator line is drawn directly below the heading, spanning the full screen width.
-- Menu item text does not use letter-key prefixes; each item is drawn as plain title-cased text (`New Trip File`, `Show Used and Free`, `Start Webserver`, `Reset Tracker`, `Format SDcard`, `List Trip Files`, `Exit`) at font scale 2.
+- Menu item text does not use letter-key prefixes; each item is drawn as plain title-cased text (`New Trip File`, `Display Blackout: <n> Min` / `Display Blackout: Never`, `Start Webserver`, `Show Used and Free`, `List Trip Files`, `Format SDcard`, `Reset Tracker`, `Exit`) at font scale 2.
 - The item under the cursor is drawn in purple; unselected items are drawn in yellow.
 - General on-screen UI text uses mixed/title case, not all-capitals, except for short fixed-width status labels on the main display (`GPS`, `NO GPS`, `SAT:nn`, `TRIP`, `SPEED`, `AVG SPEED`, `SD ERR`) which remain upper-case.
 - The bitmap glyph renderer in `components/lcd/lcd.c` has distinct lowercase letter shapes (with true descenders for `g`, `j`, `p`, `q`, `y`) separate from the upper-case shapes, so mixed-case text renders differently from all-caps text.
 
 Selecting `Start Webserver` in `[System Menu]` transitions straight to `[Start Webserver]`; it does not pass through the generic `menu_action`/`Executing` flow, so no interim action screen is shown.
 
+Selecting `Format SDcard` in `[System Menu]` transitions straight to the `[Format SDcard]` confirmation screen described above; it also does not pass through the generic `menu_action`/`Executing` flow. Formatting itself (on `Yes` + long press) runs synchronously and returns directly to `[System Menu]` without showing an `Executing` screen.
+
 Before `[Start Webserver]` starts, all trip file pairs whose `.gpx` file is smaller
 than 5120 bytes are deleted (both the `.gpx` and its matching `.csv`). The
 trip currently being recorded is never deleted by this check, even if its
 current `.gpx` file is still below that size.
 
-After a short Button B execution on the remaining actions, the display is cleared and shows an Action screen. `Reset Tracker` and `Format SDcard` show `Executing` and the selected operation. `New Trip File` shows the `NEW TRIP FILE` header, the label `New File`, and the new file's `EEYYMMDD-HHmmSS` date/time (from `sdcard_get_active_trip_datetime()`) instead of `Executing`. `Show Used and Free` shows the `SD CARD INFO` header with `Used:` (red, left-aligned) above its indented white value, and `Free:` (green, left-aligned) above its indented white value, or `Sd unavailable` in red when the card is not mounted. Each value is auto-scaled by `format_storage_bytes()` to GB (2 decimals), MB, or KB, whichever fits best, with `,` thousand separators. Action screens remain visible until another short Button B press returns to the system menu, except that a successful `Format SDcard` action returns automatically to the system menu, and a `List Trip Files` action shows `Executing` briefly and then opens `[List Trips]` automatically.
+After a short Button B execution on the remaining actions, the display is cleared and shows an Action screen. `Reset Tracker` shows `Executing` and the selected operation. `New Trip File` shows the `NEW TRIP FILE` header, the label `New File`, and the new file's `EEYYMMDD-HHmmSS` date/time (from `sdcard_get_active_trip_datetime()`) instead of `Executing`. `Show Used and Free` shows the `SD CARD INFO` header with `Used:` (red, left-aligned) above its indented white value, and `Free:` (green, left-aligned) above its indented white value, or `Sd unavailable` in red when the card is not mounted. Each value is auto-scaled by `format_storage_bytes()` to GB (2 decimals), MB, or KB, whichever fits best, with `,` thousand separators. Action screens remain visible until another short Button B press returns to the system menu, except that a `List Trip Files` action shows `Executing` briefly and then opens `[List Trips]` automatically.
 
 Every button release is logged with the physical position, button name, `SHORT` or `LONG` press classification, and press duration. Menu cursor changes and selected actions are also logged.
 

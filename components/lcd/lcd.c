@@ -734,26 +734,17 @@ void lcd_render(const lcd_view_t* v)
       case 0:
         action = "Reset Trip";
         break;
-      case 1:
+      case 3:
         action = "Used and Free";
         break;
-      case 2:
-        action = "Start Webserver";
-        break;
-      case 3:
+      case 6:
         action = "Reset Tracker";
-        break;
-      case 4:
-        action = "Format SDcard";
-        break;
-      case 5:
-        action = "List Trip Files";
         break;
       default:
         break;
       }
       fill_rect(0, 0, LCD_W, LCD_H, LCD_COLOR_BLACK);
-      if (v->action_selection == 1)
+      if (v->action_selection == 3)
       {
         draw_header("SD CARD INFO", v->prog_version);
         if (v->storage_available)
@@ -795,6 +786,34 @@ void lcd_render(const lcd_view_t* v)
     return;
   }
 
+  if (v->format_confirm_menu)
+  {
+    if (full || !s_prev.format_confirm_menu || v->format_confirm_yes != s_prev.format_confirm_yes)
+    {
+      fill_rect(0, 0, LCD_W, LCD_H, LCD_COLOR_BLACK);
+      draw_header("Format SDcard", v->prog_version);
+      draw_text_centered(60, "Erase all SD card data?", 2, LCD_COLOR_YELLOW);
+
+      uint16_t no_color = v->format_confirm_yes ? LCD_COLOR_YELLOW : LCD_COLOR_PURPLE;
+      uint16_t yes_color = v->format_confirm_yes ? LCD_COLOR_PURPLE : LCD_COLOR_YELLOW;
+      draw_text_centered(110, "No", 3, no_color);
+      draw_text_centered(150, "Yes", 3, yes_color);
+
+      draw_text(7, 190, "Short MidKey: Toggle", 2, LCD_COLOR_WHITE);
+      if (v->format_confirm_yes)
+      {
+        draw_text(7, 211, "Long MidKey: Format now!", 2, LCD_COLOR_RED);
+      }
+      else
+      {
+        draw_text(7, 211, "Long MidKey: Cancel", 2, LCD_COLOR_WHITE);
+      }
+    }
+    s_prev = *v;
+    s_have_prev = true;
+    return;
+  }
+
   if (v->wifi_status != LCD_WIFI_NONE && !v->system_menu)
   {
     bool log_changed =
@@ -826,7 +845,7 @@ void lcd_render(const lcd_view_t* v)
         v->storage_available != s_prev.storage_available ||
         v->storage_details != s_prev.storage_details ||
         v->menu_selection != s_prev.menu_selection || v->menu_scroll != s_prev.menu_scroll ||
-        v->wifi_status != s_prev.wifi_status)
+        v->blackout_minutes != s_prev.blackout_minutes || v->wifi_status != s_prev.wifi_status)
     {
       fill_rect(0, 0, LCD_W, 240, LCD_COLOR_BLACK);
       draw_text(7, 7, "SYSTEM MENU", 2, LCD_COLOR_CYAN);
@@ -846,12 +865,12 @@ void lcd_render(const lcd_view_t* v)
       fill_rect(0, 29, LCD_W, 1, LCD_COLOR_DARKGREY);
 
       static const char* const kMenuItems[] = {
-          "New Trip File", "Show Used and Free", "Start Webserver",
-          "Reset Tracker", "Format SDcard",      "List Trip Files",
-          "Exit",
+          "New Trip File",   "Display Blackout", "Start Webserver", "Show Used and Free",
+          "List Trip Files", "Format SDcard",    "Reset Tracker",   "Exit",
       };
-      const int kMenuItemCount = 7;
+      const int kMenuItemCount = 8;
       const int kVisibleMenuItems = 6;
+      char blackout_item_text[32];
       for (int i = 0; i < kVisibleMenuItems; ++i)
       {
         int item_index = v->menu_scroll + i;
@@ -860,7 +879,21 @@ void lcd_render(const lcd_view_t* v)
           break;
         }
         uint16_t color = item_index == v->menu_selection ? LCD_COLOR_PURPLE : LCD_COLOR_YELLOW;
-        draw_text(18, 42 + i * 29, kMenuItems[item_index], 2, color);
+        const char* item_text = kMenuItems[item_index];
+        if (item_index == 1)
+        {
+          if (v->blackout_minutes == 0)
+          {
+            snprintf(blackout_item_text, sizeof(blackout_item_text), "Display Blackout: Never");
+          }
+          else
+          {
+            snprintf(blackout_item_text, sizeof(blackout_item_text), "Display Blackout: %u Min",
+                     v->blackout_minutes);
+          }
+          item_text = blackout_item_text;
+        }
+        draw_text(18, 42 + i * 29, item_text, 2, color);
       }
     }
     s_prev = *v;

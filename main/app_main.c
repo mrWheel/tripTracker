@@ -23,14 +23,19 @@
 // — Program version string (keep manually updated with each release)
 // — NEVER CHANGE THIS const char* NAME
 // —             vvvvvvvvvvvvvv
-static const char* PROG_VERSION = "v1.3.4";
+static const char* PROG_VERSION = "v1.3.5";
 // —             ^^^^^^^^^^^^^^
 static const char* TAG = "tripTracker";
 
 //-- Total system-menu items and how many are visible at once; must stay in
 //-- sync with lcd.c's kMenuItems array and kVisibleMenuItems.
-#define MENU_ITEM_COUNT 7
+#define MENU_ITEM_COUNT 8
 #define MENU_VISIBLE_ITEMS 6
+
+//-- Cycle order for the [System Menu] > Display Blackout toggle, in minutes;
+//-- 0 means the display never blacks out automatically.
+static const uint8_t kBlackoutMinuteOptions[] = {1, 2, 4, 8, 0};
+#define BLACKOUT_OPTION_COUNT (sizeof(kBlackoutMinuteOptions) / sizeof(kBlackoutMinuteOptions[0]))
 
 //-- Rows visible at once in [LIST TRIPS]; must stay in sync with lcd.c's
 //-- max_visible_rows for the list_trips_menu screen.
@@ -50,8 +55,11 @@ static bool g_system_menu = false;
 static bool g_wifi_menu = false;
 static bool g_list_trips_menu = false;
 static bool g_trip_info_menu = false;
+static bool g_format_confirm_menu = false;
+static bool g_format_confirm_yes = false;
 static uint8_t g_menu_selection = 0;
 static uint8_t g_menu_scroll = 0;
+static uint8_t g_blackout_minutes = 4;
 static bool g_menu_action_active = false;
 static bool g_menu_action_pending = false;
 static uint8_t g_menu_action_selection = 0;
@@ -136,20 +144,51 @@ static const char* menu_option_name(uint8_t selection)
   case 0:
     return "New Trip file and reset Trip";
   case 1:
-    return "Show Used & Free on SD";
+    return "Display Blackout";
   case 2:
     return "Start Webserver";
   case 3:
-    return "Reset Tracker";
+    return "Show Used & Free on SD";
   case 4:
-    return "Format SDcard";
-  case 5:
     return "List Trip Files";
+  case 5:
+    return "Format SDcard";
   case 6:
+    return "Reset Tracker";
+  case 7:
     return "Exit";
   default:
     return "Unknown";
   }
+}
+
+//-- Formats the current Display Blackout setting as "Never" or "<n> Min".
+static void blackout_setting_label(char* buffer, size_t buffer_len)
+{
+  if (g_blackout_minutes == 0)
+  {
+    snprintf(buffer, buffer_len, "Never");
+  }
+  else
+  {
+    snprintf(buffer, buffer_len, "%u Min", g_blackout_minutes);
+  }
+}
+
+//-- Advances the Display Blackout setting to the next value in
+//-- kBlackoutMinuteOptions, wrapping back to the first entry.
+static void advance_blackout_setting(void)
+{
+  size_t current_index = 0;
+  for (size_t i = 0; i < BLACKOUT_OPTION_COUNT; ++i)
+  {
+    if (kBlackoutMinuteOptions[i] == g_blackout_minutes)
+    {
+      current_index = i;
+      break;
+    }
+  }
+  g_blackout_minutes = kBlackoutMinuteOptions[(current_index + 1) % BLACKOUT_OPTION_COUNT];
 }
 
 static void refresh_trip_list(void)
@@ -178,21 +217,29 @@ static void log_menu_cursor(board_button_t button)
            menu_option_name(g_menu_selection));
 }
 
-static uint32_t timeout_for_battery(int battery_pct, bool charging)
+//-- Turns the user-selected Display Blackout minutes into an effective
+//-- timeout in seconds, applying the low-battery reductions.
+static uint32_t effective_blackout_seconds(uint8_t setting_minutes, int battery_pct, bool charging)
 {
   if (charging)
   {
     return 0; // no automatic timeout while charging/USB powered
   }
-  if (battery_pct >= 100)
-    return 120;
-  if (battery_pct >= 75)
-    return 90;
-  if (battery_pct >= 50)
-    return 60;
-  if (battery_pct >= 25)
-    return 30;
-  return 15;
+  if (setting_minutes == 0)
+  {
+    //-- "Never" still blacks out after 1 minute once the battery drops below 25%.
+    if (battery_pct < 25)
+    {
+      return 60;
+    }
+    return 0;
+  }
+  uint32_t seconds = (uint32_t)setting_minutes * 60;
+  if (battery_pct < 50)
+  {
+    seconds /= 2;
+  }
+  return seconds;
 }
 
 static void turn_display_on(void)
@@ -215,7 +262,8 @@ static void turn_display_off(bool forced)
 
 static bool followup_screen_is_active(void)
 {
-  return g_system_menu || g_menu_action_active || g_list_trips_menu || g_trip_info_menu;
+  return g_system_menu || g_menu_action_active || g_list_trips_menu || g_trip_info_menu ||
+         g_format_confirm_menu;
 }
 
 static void return_to_main_screen(void)
@@ -225,6 +273,7 @@ static void return_to_main_screen(void)
   g_menu_action_pending = false;
   g_list_trips_menu = false;
   g_trip_info_menu = false;
+  g_format_confirm_menu = false;
   webserver_stop();
   lcd_force_redraw();
   ESP_LOGI(TAG, "Follow-up screen timeout => [Main screen]");
@@ -354,6 +403,32 @@ static void handle_button(board_button_t button, bool long_press, speedometer_t*
     return;
   }
 
+  if (g_format_confirm_menu)
+  {
+    if (button == BOARD_BUTTON_B && !long_press)
+    {
+      g_format_confirm_yes = !g_format_confirm_yes;
+      lcd_force_redraw();
+      ESP_LOGI("board", "Format SDcard confirm => [%s]", g_format_confirm_yes ? "Yes" : "No");
+    }
+    else if (button == BOARD_BUTTON_B && long_press)
+    {
+      g_format_confirm_menu = false;
+      if (g_format_confirm_yes)
+      {
+        format_sdcard();
+      }
+      else
+      {
+        ESP_LOGI("board", "Format SDcard => [Cancelled]");
+      }
+      g_system_menu = true;
+      lcd_force_redraw();
+      ESP_LOGI("board", "System Menu => [%s]", menu_option_name(g_menu_selection));
+    }
+    return;
+  }
+
   if (button == BOARD_BUTTON_B && long_press)
   {
     g_system_menu = !g_system_menu;
@@ -414,13 +489,31 @@ static void handle_button(board_button_t button, bool long_press, speedometer_t*
           lcd_force_redraw();
           break;
         }
-        if (g_menu_selection == 5)
+        if (g_menu_selection == 1)
+        {
+          advance_blackout_setting();
+          char label[16];
+          blackout_setting_label(label, sizeof(label));
+          ESP_LOGI("board", "System Menu => [Display Blackout: %s]", label);
+          lcd_force_redraw();
+          break;
+        }
+        if (g_menu_selection == 4)
         {
           refresh_trip_list();
           g_list_trips_menu = true;
           g_system_menu = false;
           lcd_force_redraw();
           ESP_LOGI("board", "List Trips => [Active]");
+          break;
+        }
+        if (g_menu_selection == 5)
+        {
+          g_format_confirm_menu = true;
+          g_format_confirm_yes = false;
+          g_system_menu = false;
+          lcd_force_redraw();
+          ESP_LOGI("board", "Format SDcard => [Confirm]");
           break;
         }
         ESP_LOGI("board", "Button B (MIDDLE) => [%s]", menu_option_name(g_menu_selection));
@@ -614,25 +707,14 @@ void app_main(void)
       {
         reset_trip(&speedo);
       }
-      else if (g_menu_action_selection == 1)
+      else if (g_menu_action_selection == 3)
       {
         sdcard_get_status(&g_storage_status);
       }
-      else if (g_menu_action_selection == 3)
+      else if (g_menu_action_selection == 6)
       {
         ESP_LOGI("board", "Button B (MIDDLE) => [Resetting Tracker]");
         esp_restart();
-      }
-      else if (g_menu_action_selection == 4)
-      {
-        format_sdcard();
-        g_menu_action_active = false;
-        g_menu_action_pending = false;
-        g_system_menu = true;
-        g_wifi_menu = false;
-        webserver_stop();
-        lcd_force_redraw();
-        ESP_LOGI("board", "System Menu => [%s]", menu_option_name(g_menu_selection));
       }
     }
 
@@ -672,7 +754,7 @@ void app_main(void)
 
     if (g_display_on && !g_display_forced_off)
     {
-      uint32_t timeout_s = timeout_for_battery(battery_pct, charging);
+      uint32_t timeout_s = effective_blackout_seconds(g_blackout_minutes, battery_pct, charging);
       if (timeout_s > 0 && (now_us - g_last_user_activity_us) > (int64_t)timeout_s * 1000000LL)
       {
         turn_display_off(false);
@@ -727,8 +809,11 @@ void app_main(void)
           .system_menu = g_system_menu,
           .menu_selection = g_menu_selection,
           .menu_scroll = g_menu_scroll,
+          .blackout_minutes = g_blackout_minutes,
           .menu_action = g_menu_action_active,
           .action_selection = g_menu_action_selection,
+          .format_confirm_menu = g_format_confirm_menu,
+          .format_confirm_yes = g_format_confirm_yes,
           .trip_number = sdcard_get_trip_number(),
           .point_count = sdcard_get_entry_count(),
           .wifi_status = wifi_status,

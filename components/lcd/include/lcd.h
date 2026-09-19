@@ -60,8 +60,11 @@ typedef struct
   bool storage_details;
   uint8_t menu_selection;
   uint8_t menu_scroll;
+  uint8_t blackout_minutes;
   bool menu_action;
   uint8_t action_selection;
+  bool format_confirm_menu;
+  bool format_confirm_yes;
   uint16_t trip_number;
   uint32_t point_count;
   lcd_wifi_status_t wifi_status;

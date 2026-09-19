@@ -1,0 +1,10 @@
+{
+  "name": "tripTracker",
+  "long_name_nl": "tripTracker",
+  "long_name_en": "tripTracker",
+  "description_en": "Native ESP-IDF GPS trip tracker for the M5Stack Core Basic that shows live speed and trip distance and exports rides to GPX/CSV on an SD card.",
+  "description_nl": "Native ESP-IDF GPS-tripcomputer voor de M5Stack Core Basic die snelheid en afgelegde afstand toont en ritten opslaat als GPX/CSV op een SD-kaart.",
+  "github_url": "https://github.com/mrWheel/",
+  "post_url": "https://willem.aandewiel.nl/",
+  "image": "tripTracker.jpg"
+}
