@@ -54,6 +54,11 @@ static uint16_t s_current_trip_number;
 static bool s_waiting_for_gps_time;
 static bool s_waiting_for_new_filename;
 static char s_closed_gpx_path[64];
+//-- Local YYYYMMDD date encoded in the active trip filename, used to detect
+//-- a local day rollover so the trip file can be rotated at midnight.
+static uint16_t s_active_local_year;
+static uint8_t s_active_local_month;
+static uint8_t s_active_local_day;
 //-- Set while [WiFi Menu] has closed every open trip file; no new trip file
 //-- is created and no GPS fixes are recorded until it is cleared again.
 static bool s_recording_suspended;
@@ -598,6 +603,21 @@ static esp_err_t save_active_gpx_path(void)
   return result;
 }
 
+//-- Extract the local YYYYMMDD date encoded in the active trip filename into
+//-- s_active_local_year/month/day, used to detect a local day rollover.
+static void update_active_local_date(void)
+{
+  const char* base = strrchr(s_trip_gpx_path, '/');
+  base = base ? base + 1 : s_trip_gpx_path;
+  int year = 0, month = 0, day = 0;
+  if (sscanf(base, "trip-%4d%2d%2d-", &year, &month, &day) == 3)
+  {
+    s_active_local_year = (uint16_t)year;
+    s_active_local_month = (uint8_t)month;
+    s_active_local_day = (uint8_t)day;
+  }
+}
+
 static void clear_active_gpx_path(void)
 {
   nvs_handle_t handle;
@@ -697,6 +717,7 @@ static esp_err_t recover_active_trip(void)
     return ESP_FAIL;
   }
   s_entry_count = count_trip_entries(s_trip_gpx_path, true);
+  update_active_local_date();
   restore_last_trip_point();
   s_waiting_for_gps_time = false;
   ESP_LOGI(TAG, "Resumed active trip %s with %u entries", s_trip_gpx_path, s_entry_count);
@@ -1019,6 +1040,7 @@ static esp_err_t create_trip_file(const gps_data_t* gps)
   s_trip_gpx_fd = new_gpx_fd;
   s_trip_csv_fd = new_csv_fd;
   s_waiting_for_new_filename = false;
+  update_active_local_date();
 
   if (write_text(s_trip_gpx_fd, s_trip_gpx_path,
                  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -1194,6 +1216,36 @@ esp_err_t sdcard_append_fix(const gps_data_t* gps, float trip_distance_m, bool s
     if (create_trip_file(gps) != ESP_OK)
     {
       return ESP_FAIL;
+    }
+  }
+
+  //-- The trip filename encodes the local date/time, so a local day rollover
+  //-- must close the current trip file and start the next one immediately,
+  //-- even while the active trip is otherwise still being recorded.
+  if (s_trip_gpx_fd >= 0 && gps->date_valid)
+  {
+    uint16_t local_year = gps->year;
+    uint8_t local_month = gps->month;
+    uint8_t local_day = gps->day;
+    uint8_t local_hour = gps->hour;
+    uint8_t local_minute = gps->minute;
+    uint8_t local_second = gps->second;
+    int offset_hours = 0;
+    gps_utc_to_local(gps, &local_year, &local_month, &local_day, &local_hour, &local_minute,
+                     &local_second, &offset_hours);
+    if (local_year != s_active_local_year || local_month != s_active_local_month ||
+        local_day != s_active_local_day)
+    {
+      ESP_LOGI(TAG, "Local date rollover detected; closing trip file and starting a new one");
+      if (close_trip_files() != ESP_OK)
+      {
+        return ESP_FAIL;
+      }
+      clear_active_gpx_path();
+      if (create_trip_file(gps) != ESP_OK)
+      {
+        return ESP_FAIL;
+      }
     }
   }
 

@@ -196,7 +196,13 @@ While a trip is still being recorded, its GPX file carries an extra "O" (open) m
 trip-EEYYMMDD-HHmmSSO.gpx
 ```
 
-The active trip's GPX path (including the `O` marker) is stored in NVS. The `O` marker is dropped — the file is renamed to `trip-EEYYMMDD-HHmmSS.gpx` — only when the trip is actually closed: when `[System Menu] > New Trip File` is chosen, when the SD card is formatted, when small trip files are cleaned up, or when `[Start Webserver]` is entered (see below). A `.gpx` file ending in `O` on the SD card always means it was still open the last time the application saw it.
+The active trip's GPX path (including the `O` marker) is stored in NVS. The `O` marker is dropped — the file is renamed to `trip-EEYYMMDD-HHmmSS.gpx` — only when the trip is actually closed: when `[System Menu] > New Trip File` is chosen, when the SD card is formatted, when small trip files are cleaned up, when `[Start Webserver]` is entered (see below), or on a local-day rollover (see below). A `.gpx` file ending in `O` on the SD card always means it was still open the last time the application saw it.
+
+### Local-Day Rollover
+
+The trip filename encodes the local date/time, so a trip file must never span more than one local calendar day. `sdcard_append_fix()` in `components/sdcard/sdcard.c` converts every incoming GPS fix's UTC date/time to local date/time (`gps_utc_to_local()`) and compares it against the local date encoded in the currently active trip filename (`s_active_local_year`/`month`/`day`, kept in sync by `update_active_local_date()` whenever a trip file is created or resumed at boot).
+
+As soon as the local date advances past the active trip file's date — i.e. local midnight has passed since the file was created — the active trip file is closed immediately (closing tags written, `O` marker dropped, same as a normal close) and a new `trip-EEYYMMDD-HHmmSS` GPX/CSV pair is created with the new local date/time, before the triggering fix is written. This happens automatically mid-trip, independent of `[System Menu] > New Trip File`, and does not delete the just-closed file even if it has fewer than 20 entries.
 
 - The numeric identifier `EEYY` is the Centery+Year (2025, 2026 etc.).
 - The numeric identifier `MM` is the Month (01 .. 12)
