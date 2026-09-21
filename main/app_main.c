@@ -23,7 +23,7 @@
 // — Program version string (keep manually updated with each release)
 // — NEVER CHANGE THIS const char* NAME
 // —             vvvvvvvvvvvvvv
-static const char* PROG_VERSION = "v1.5.0";
+static const char* PROG_VERSION = "v1.5.1";
 // —             ^^^^^^^^^^^^^^
 static const char* TAG = "tripTracker";
 

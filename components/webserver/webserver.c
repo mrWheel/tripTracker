@@ -23,6 +23,10 @@ static const char* TAG = "webserver";
 static httpd_handle_t s_server;
 static bool s_network_active;
 static bool s_mdns_active;
+//-- Running count of accepted-but-not-yet-closed sockets, tracked via
+//-- open_fn/close_fn below; logged on every change to make socket exhaustion
+//-- (the CONFIG_LWIP_MAX_SOCKETS ceiling) visible before it happens.
+static volatile int s_open_socket_count;
 
 //-- Live connection state, tracked independently of wifi_prov_is_connected()
 //-- (which is never cleared again once a STA connection later drops).
@@ -103,6 +107,28 @@ static esp_err_t mount_littlefs(void)
   return err;
 }
 
+//-- httpd_config_t.open_fn hook: fires for EVERY accepted socket (each static
+//-- GUI asset request and the /ws upgrade alike), before any request is
+//-- parsed. This is the earliest point at which we can see a client actually
+//-- reach accept() at all, and how close the system is to CONFIG_LWIP_MAX_SOCKETS.
+static esp_err_t on_socket_open(httpd_handle_t hd, int sockfd)
+{
+  (void)hd;
+  s_open_socket_count++;
+  ESP_LOGI(TAG, "Socket accepted (fd=%d, open=%d)", sockfd, s_open_socket_count);
+  return ESP_OK;
+}
+
+//-- httpd_config_t.close_fn hook: fires for every socket close, not just
+//-- WebSocket sessions. Logs the running count, then forwards to the
+//-- WebSocket-specific cleanup already implemented in webserver_api.c.
+static void on_socket_close(httpd_handle_t hd, int sockfd)
+{
+  s_open_socket_count--;
+  ESP_LOGI(TAG, "Socket closed (fd=%d, open=%d)", sockfd, s_open_socket_count);
+  webserver_ws_on_session_close(hd, sockfd);
+}
+
 static void start_http_server(void)
 {
   if (s_server != NULL)
@@ -115,14 +141,37 @@ static void start_http_server(void)
   config.max_uri_handlers = 16;
   //-- Raised from the default 7 now that CONFIG_LWIP_MAX_SOCKETS gives the
   //-- system enough headroom (mDNS/WiFi included) for this many client sockets.
+  //-- httpd_start() itself reserves 3 sockets from CONFIG_LWIP_MAX_SOCKETS on
+  //-- top of this value, so this + 3 must leave real headroom for the rest of
+  //-- the system (WiFi/DHCP/ARP/etc.) — see CONFIG_LWIP_MAX_SOCKETS=22 in
+  //-- sdkconfig.defaults.
   config.max_open_sockets = 10;
   //-- Without this, once max_open_sockets lingering connections pile up the
   //-- server can no longer accept() anything at all (not even a fresh /ws
   //-- reconnect); purging the least-recently-used one keeps it unstuck.
   config.lru_purge_enable = true;
-  //-- Notified whenever a WebSocket session closes, so the single-client
-  //-- "active" state is cleared even on abnormal disconnects.
-  config.close_fn = webserver_ws_on_session_close;
+  //-- Logs and counts every accepted socket, regardless of URI.
+  config.open_fn = on_socket_open;
+  //-- Logs+counts the close, then clears the single-client "active" state
+  //-- (webserver_ws_on_session_close) even on abnormal disconnects.
+  config.close_fn = on_socket_close;
+  //-- Without SO_KEEPALIVE, lwIP only notices a WebSocket peer that vanished
+  //-- without a clean close (WiFi drop, laptop sleep, ...) once it gives up
+  //-- retransmitting the unacked handshake/data after CONFIG_LWIP_TCP_MAXRTX
+  //-- attempts — observed on hardware as a ~300s stall before the socket is
+  //-- reclaimed ("httpd_ws_get_frame_type: ... socket FD invalid"), during
+  //-- which the GUI just sits dead. These settings detect it in ~15s instead.
+  config.keep_alive_enable = true;
+  config.keep_alive_idle = 5;
+  config.keep_alive_interval = 3;
+  config.keep_alive_count = 3;
+  //-- Default (4096) proved too small: handle_msg_download()'s locals alone
+  //-- (full_path[320] + buffer[2048]) plus cJSON and the SD/SPI driver call
+  //-- chain underneath overflowed it, corrupting heap-adjacent structures and
+  //-- crashing later inside the FreeRTOS scheduler on Download/Delete clicks.
+  config.stack_size = 10240;
+
+  s_open_socket_count = 0;
 
   esp_err_t err = httpd_start(&s_server, &config);
   if (err != ESP_OK)
@@ -137,6 +186,8 @@ static void start_http_server(void)
 
   report_status("Starting Webserver");
   report_success("> Webserver active");
+  ESP_LOGI(TAG, "max_open_sockets=%d, max_uri_handlers=%d", config.max_open_sockets,
+           config.max_uri_handlers);
 }
 
 static void stop_http_server(void)
@@ -155,6 +206,15 @@ static void on_wifi_connected(void)
   //-- Fires when the portal flow hands over a working STA connection.
   s_sta_connected = true;
   s_ap_mode = false;
+  //-- ESP-IDF defaults to WIFI_PS_MIN_MODEM (visible in the boot log as
+  //-- "wifi:pm start, type: 1"), which lets the radio sleep between beacons.
+  //-- That sleep can delay/miss inbound packets on the long-lived /ws
+  //-- connection this GUI depends on for seconds at a time, long enough for
+  //-- the browser to consider it dead and fire onclose (observed on hardware
+  //-- as the WS connection dying every few seconds while the ESP32-side
+  //-- session still thinks it's fine). A single-client file-manager GUI has
+  //-- no power budget worth saving here, so disable power save outright.
+  esp_wifi_set_ps(WIFI_PS_NONE);
   char ssid[33] = "";
   char ip_address[16] = "";
   webserver_get_wifi_display_info(ssid, sizeof(ssid), ip_address, sizeof(ip_address));

@@ -13,9 +13,21 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_MAIN_TASK_STACK_SIZE=8192
 #-- Required for the single-client WebSocket-based file-manager GUI.
 CONFIG_HTTPD_WS_SUPPORT=y
+#-- CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT is deliberately NOT enabled:
+#-- sending a frame from that hook was found to break the normal WS
+#-- recv/response flow on this IDF version (see /useWebSockets.md section 5).
+#-- "hello"/takeover instead runs from check_takeover() in webserver_api.c,
+#-- called on every inbound WS data frame.
 #-- The default of 10 is the whole system's socket budget (shared with mDNS,
 #-- WiFi, etc.), not just the http server's. A single page load (index.html +
 #-- style.css + app.js + favicon.ico + the /ws upgrade) could exhaust it,
 #-- making accept() fail system-wide with errno 23 (ENFILE) and the server
 #-- become completely unreachable.
-CONFIG_LWIP_MAX_SOCKETS=16
+#-- httpd_start() itself reserves 3 sockets from this budget on top of
+#-- max_open_sockets (see webserver.c), so with the old value of 16 the
+#-- webserver alone (3 + max_open_sockets=10) already claimed 13 of 16,
+#-- leaving only 3 sockets for the rest of the system (WiFi/DHCP/ARP/etc.).
+#-- That margin was exhausted within minutes with zero completed HTTP/WS
+#-- requests logged, confirmed on hardware via "httpd_accept_conn: error in
+#-- accept (23)". Raised to 22 to restore real headroom.
+CONFIG_LWIP_MAX_SOCKETS=22

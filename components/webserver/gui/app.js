@@ -201,7 +201,8 @@ function handleWsMessage(event)
   switch (message.type)
   {
     case "hello":
-      refreshFileList();
+      //-- Connection-confirmed ack; the file list is already requested from
+      //-- ws.onopen, so no action needed here.
       break;
     case "taken_over":
       showOverlay("Connection lost or taken over");
@@ -235,6 +236,12 @@ function connectWebSocket()
   ws = new WebSocket(protocol + "//" + location.host + "/ws");
   ws.binaryType = "arraybuffer";
   ws.onmessage = handleWsMessage;
+  ws.onopen = function ()
+  {
+    //-- The server never pushes anything before it sees a data frame from
+    //-- us (see check_takeover() in webserver_api.c), so we have to speak first.
+    refreshFileList();
+  };
   ws.onclose = function ()
   {
     showOverlay("Connection lost or taken over");

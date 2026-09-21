@@ -20,11 +20,13 @@ static const static_file_t s_static_files[] = {
     {"/index.html", "index.html", "text/html"},
     {"/style.css", "style.css", "text/css"},
     {"/app.js", "app.js", "application/javascript"},
+    {"/favicon.ico", "favicon.ico", "image/x-icon"},
 };
 
 static esp_err_t serve_static_file(httpd_req_t* req)
 {
   const static_file_t* entry = (const static_file_t*)req->user_ctx;
+  int fd = httpd_req_to_sockfd(req);
 
   char path[64];
   snprintf(path, sizeof(path), "%s/%s", WEBSERVER_LITTLEFS_MOUNT_POINT, entry->file_name);
@@ -32,11 +34,12 @@ static esp_err_t serve_static_file(httpd_req_t* req)
   FILE* file = fopen(path, "r");
   if (file == NULL)
   {
-    ESP_LOGE(TAG, "Missing GUI asset: %s", path);
+    ESP_LOGE(TAG, "Missing GUI asset: %s (fd=%d)", path, fd);
     httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "GUI asset not found");
     return ESP_FAIL;
   }
 
+  ESP_LOGI(TAG, "Serving %s (fd=%d)", req->uri, fd);
   httpd_resp_set_type(req, entry->content_type);
   //-- Static assets are small and requested once per page load; closing the
   //-- socket right away (instead of HTTP keep-alive) frees it for the /ws
@@ -59,6 +62,10 @@ static esp_err_t serve_static_file(httpd_req_t* req)
   if (result == ESP_OK)
   {
     httpd_resp_send_chunk(req, NULL, 0);
+  }
+  else
+  {
+    ESP_LOGW(TAG, "Failed to send %s (fd=%d)", req->uri, fd);
   }
   return result;
 }

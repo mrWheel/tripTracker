@@ -549,6 +549,7 @@ static void dispatch_text_message(httpd_req_t* req, const char* data, size_t len
 
   cJSON* type_item = cJSON_GetObjectItemCaseSensitive(msg, "type");
   const char* type = cJSON_IsString(type_item) ? type_item->valuestring : "";
+  ESP_LOGI(TAG, "WS message '%s' from fd=%d", type, httpd_req_to_sockfd(req));
 
   if (strcmp(type, "list") == 0)
   {
@@ -592,13 +593,24 @@ static void async_notify_takeover(void* arg)
   httpd_sess_trigger_close(s_ws_server, fd);
 }
 
-static esp_err_t handle_ws_connect(httpd_req_t* req)
+//-- Enforces "only one active client" on the /ws connection. Must run from
+//-- the first inbound data frame of a new fd, NOT from ws_post_handshake_cb:
+//-- on this ESP-IDF version, sending a frame from that hook breaks the
+//-- normal recv/response flow for the connection (confirmed the hard way in
+//-- a prior project, see /useWebSockets.md section 5), so this project uses
+//-- the same first-data-frame check that project settled on instead.
+static void check_takeover(httpd_req_t* req)
 {
   int fd = httpd_req_to_sockfd(req);
+  if (fd == s_active_fd)
+  {
+    return;
+  }
+
   char ip[46];
   format_peer_ip(fd, ip, sizeof(ip));
 
-  if (s_active_fd >= 0 && s_active_fd != fd)
+  if (s_active_fd >= 0)
   {
     ESP_LOGI(TAG, "%s taken over by %s (fd %d -> %d)", s_active_ip, ip, s_active_fd, fd);
     httpd_queue_work(s_ws_server, async_notify_takeover, (void*)(intptr_t)s_active_fd);
@@ -614,24 +626,23 @@ static esp_err_t handle_ws_connect(httpd_req_t* req)
   cJSON_AddStringToObject(hello, "type", "hello");
   send_json(req, hello);
   cJSON_Delete(hello);
-  return ESP_OK;
 }
 
 static esp_err_t ws_handler(httpd_req_t* req)
 {
-  if (req->method == HTTP_GET)
-  {
-    return handle_ws_connect(req);
-  }
+  int fd = httpd_req_to_sockfd(req);
+  check_takeover(req);
 
   httpd_ws_frame_t ws_pkt = {0};
   ws_pkt.type = HTTPD_WS_TYPE_TEXT;
   esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
   if (ret != ESP_OK)
   {
-    ESP_LOGW(TAG, "httpd_ws_recv_frame failed to get frame len: %s", esp_err_to_name(ret));
+    ESP_LOGW(TAG, "httpd_ws_recv_frame failed to get frame len (fd=%d): %s", fd,
+             esp_err_to_name(ret));
     return ret;
   }
+  ESP_LOGI(TAG, "WS frame type=%d len=%u (fd=%d)", ws_pkt.type, (unsigned)ws_pkt.len, fd);
 
   uint8_t* buf = NULL;
   if (ws_pkt.len)
@@ -645,7 +656,7 @@ static esp_err_t ws_handler(httpd_req_t* req)
     ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
     if (ret != ESP_OK)
     {
-      ESP_LOGW(TAG, "httpd_ws_recv_frame failed: %s", esp_err_to_name(ret));
+      ESP_LOGW(TAG, "httpd_ws_recv_frame failed (fd=%d): %s", fd, esp_err_to_name(ret));
       free(buf);
       return ret;
     }
@@ -671,6 +682,14 @@ esp_err_t webserver_api_register(httpd_handle_t server)
   s_active_ip[0] = '\0';
   memset(&s_upload, 0, sizeof(s_upload));
 
+  //-- Deliberately no .ws_post_handshake_cb here: esp_http_server completes
+  //-- the WS opening handshake (sending the 101 response) internally and
+  //-- never calls .handler for that initial GET (see httpd_uri.c: "If the
+  //-- request is websocket handshake, then do not call the uri->handler"),
+  //-- but sending a frame from .ws_post_handshake_cb was found to break the
+  //-- normal recv/response flow on this IDF version (see /useWebSockets.md
+  //-- section 5), so "hello"/takeover instead runs from check_takeover(),
+  //-- called on every inbound WS data frame from ws_handler().
   httpd_uri_t ws_uri = {
       .uri = "/ws",
       .method = HTTP_GET,
@@ -689,8 +708,13 @@ void webserver_ws_on_session_close(httpd_handle_t hd, int sockfd)
     s_active_fd = -1;
     s_active_ip[0] = '\0';
   }
+  else
+  {
+    ESP_LOGD(TAG, "Non-active session closed (fd=%d)", sockfd);
+  }
   if (s_upload.active && s_upload.fd == sockfd)
   {
+    ESP_LOGW(TAG, "Upload aborted by session close (fd=%d)", sockfd);
     abort_upload();
   }
 }

@@ -100,6 +100,8 @@ Open `http://tripTracker.local` after connecting, or use the displayed IP addres
 - delete files, except the web interface files themselves;
 - show distance and average speed for SD-card GPX trip files.
 
+The file manager talks to the device over a single WebSocket connection. Only one browser/client can be active at a time; opening it from a second client takes over the connection and shows a "Connection lost or taken over" popup with a Reconnect button on the first one.
+
 Hold the middle button to close the WiFi Menu. There is currently no separate WiFi Menu photo in `assets`.
 
 ## Display
@@ -171,6 +173,7 @@ While `[WiFi Menu]` is open, a browser-based file manager is served at `http://t
 - Trip `.gpx` files on the SD card also show their total distance and average speed, read from the matching CSV export.
 - `[Download]` and `[Delete]` are buttons; `[Refresh]` reloads the list on demand.
 - The GUI's own LittleFS files (`style.css`, `index.html`, `app.js`) can never be deleted; their `[Delete]` button is shown disabled.
+- The GUI is served over a single `/ws` WebSocket connection (list/download/upload/delete all go through it); only one client may be connected at a time.
 
 Wi-Fi and the webserver only run while `[WiFi Menu]` is open, to minimize power usage otherwise.
 

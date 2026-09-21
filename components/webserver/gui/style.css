@@ -237,6 +237,13 @@ td:first-child {
   z-index: 1000;
 }
 
+/* [hidden] has the same specificity as .ws-overlay above, so without this
+   override the "display: flex" here wins the cascade and the hidden
+   attribute set/cleared from app.js has no visual effect. */
+.ws-overlay[hidden] {
+  display: none;
+}
+
 .ws-modal {
   background: var(--card-bg);
   border-radius: 12px;
