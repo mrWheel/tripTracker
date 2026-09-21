@@ -113,6 +113,16 @@ static void start_http_server(void)
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.uri_match_fn = httpd_uri_match_wildcard;
   config.max_uri_handlers = 16;
+  //-- Raised from the default 7 now that CONFIG_LWIP_MAX_SOCKETS gives the
+  //-- system enough headroom (mDNS/WiFi included) for this many client sockets.
+  config.max_open_sockets = 10;
+  //-- Without this, once max_open_sockets lingering connections pile up the
+  //-- server can no longer accept() anything at all (not even a fresh /ws
+  //-- reconnect); purging the least-recently-used one keeps it unstuck.
+  config.lru_purge_enable = true;
+  //-- Notified whenever a WebSocket session closes, so the single-client
+  //-- "active" state is cleared even on abnormal disconnects.
+  config.close_fn = webserver_ws_on_session_close;
 
   esp_err_t err = httpd_start(&s_server, &config);
   if (err != ESP_OK)

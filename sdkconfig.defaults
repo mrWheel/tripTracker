@@ -11,3 +11,11 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 #-- was already marginal and overflowed once the trip-list/trip-info state grew.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_MAIN_TASK_STACK_SIZE=8192
+#-- Required for the single-client WebSocket-based file-manager GUI.
+CONFIG_HTTPD_WS_SUPPORT=y
+#-- The default of 10 is the whole system's socket budget (shared with mDNS,
+#-- WiFi, etc.), not just the http server's. A single page load (index.html +
+#-- style.css + app.js + favicon.ico + the /ws upgrade) could exhaust it,
+#-- making accept() fail system-wide with errno 23 (ENFILE) and the server
+#-- become completely unreachable.
+CONFIG_LWIP_MAX_SOCKETS=16

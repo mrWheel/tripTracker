@@ -1,9 +1,14 @@
 #include "webserver_internal.h"
 
+#include <arpa/inet.h>
 #include <dirent.h>
+#include <netinet/in.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -15,31 +20,68 @@
 
 static const char* TAG = "webserver_api";
 
-//-- Resolves the "store" query parameter ("sd" or "fs") to its VFS mount point.
-static esp_err_t resolve_store_base(httpd_req_t* req, char* store_value, size_t store_value_size,
-                                    const char** base_path)
-{
-  char query[64];
-  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK)
-  {
-    return ESP_FAIL;
-  }
-  if (httpd_query_key_value(query, "store", store_value, store_value_size) != ESP_OK)
-  {
-    return ESP_FAIL;
-  }
+//-- Chunk size used when streaming a file download over the WebSocket.
+#define WEBSERVER_WS_CHUNK_SIZE 2048
 
-  if (strcmp(store_value, "sd") == 0)
+//-- The single WebSocket file-manager connection. Only one client may ever
+//-- be "active"; a newer handshake takes over from an older one.
+static httpd_handle_t s_ws_server;
+static int s_active_fd = -1;
+//-- Remembered for the disconnect log line, since the socket is no longer
+//-- queryable by the time webserver_ws_on_session_close() runs.
+static char s_active_ip[46] = "";
+
+//-- Formats the peer address of an open socket as a plain IP string.
+static void format_peer_ip(int fd, char* out, size_t out_size)
+{
+  out[0] = '\0';
+  struct sockaddr_storage addr;
+  socklen_t addr_len = sizeof(addr);
+  if (getpeername(fd, (struct sockaddr*)&addr, &addr_len) != 0)
+  {
+    return;
+  }
+  if (addr.ss_family == AF_INET)
+  {
+    inet_ntop(AF_INET, &((struct sockaddr_in*)&addr)->sin_addr, out, out_size);
+  }
+  else if (addr.ss_family == AF_INET6)
+  {
+    inet_ntop(AF_INET6, &((struct sockaddr_in6*)&addr)->sin6_addr, out, out_size);
+  }
+}
+
+//-- Persisted across the separate WebSocket frames of one client's upload,
+//-- since only one client (and therefore one upload) can ever be in flight.
+typedef struct
+{
+  bool active;
+  int fd;
+  FILE* file;
+  char path[320];
+  char name[64];
+} ws_upload_state_t;
+static ws_upload_state_t s_upload;
+
+//-- Resolves a JSON "store" field ("sd" or "fs") to its VFS mount point.
+static bool resolve_store_base(cJSON* msg, const char** base_path)
+{
+  cJSON* store_item = cJSON_GetObjectItemCaseSensitive(msg, "store");
+  if (!cJSON_IsString(store_item))
+  {
+    return false;
+  }
+  if (strcmp(store_item->valuestring, "sd") == 0)
   {
     *base_path = SDCARD_MOUNT_POINT;
-    return ESP_OK;
+    return true;
   }
-  if (strcmp(store_value, "fs") == 0)
+  if (strcmp(store_item->valuestring, "fs") == 0)
   {
     *base_path = WEBSERVER_LITTLEFS_MOUNT_POINT;
-    return ESP_OK;
+    return true;
   }
-  return ESP_FAIL;
+  return false;
 }
 
 //-- Rejects empty names and any attempt to escape the store's root directory.
@@ -78,7 +120,7 @@ static bool is_protected_littlefs_file(const char* base_path, const char* name)
   return false;
 }
 
-//-- Maximum number of directory entries handle_list() will sort and report.
+//-- Maximum number of directory entries build_files_json() will sort and report.
 #define WEBSERVER_API_MAX_LISTED_FILES 256
 
 typedef struct
@@ -195,21 +237,14 @@ static bool read_trip_web_summary(const char* path, float* distance_m, float* av
   return true;
 }
 
-static esp_err_t handle_list(httpd_req_t* req)
+static cJSON* build_files_json(const char* base_path)
 {
-  char store_value[8];
-  const char* base_path;
-  if (resolve_store_base(req, store_value, sizeof(store_value), &base_path) != ESP_OK)
-  {
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or missing 'store' parameter");
-    return ESP_FAIL;
-  }
+  cJSON* array = cJSON_CreateArray();
 
   DIR* dir = opendir(base_path);
   if (dir == NULL)
   {
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to open storage directory");
-    return ESP_FAIL;
+    return array;
   }
 
   webserver_file_entry_t* entries =
@@ -217,8 +252,7 @@ static esp_err_t handle_list(httpd_req_t* req)
   if (entries == NULL)
   {
     closedir(dir);
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
-    return ESP_FAIL;
+    return array;
   }
 
   size_t entry_count = 0;
@@ -258,7 +292,6 @@ static esp_err_t handle_list(httpd_req_t* req)
 
   qsort(entries, entry_count, sizeof(webserver_file_entry_t), compare_file_entries_newest_first);
 
-  cJSON* array = cJSON_CreateArray();
   for (size_t i = 0; i < entry_count; i++)
   {
     webserver_file_entry_t* out = &entries[i];
@@ -274,82 +307,184 @@ static esp_err_t handle_list(httpd_req_t* req)
   }
   free(entries);
 
-  char* json_text = cJSON_PrintUnformatted(array);
-  cJSON_Delete(array);
-
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-  httpd_resp_sendstr(req, json_text);
-  free(json_text);
-  return ESP_OK;
+  return array;
 }
 
-static esp_err_t handle_download(httpd_req_t* req)
+static void send_json(httpd_req_t* req, cJSON* obj)
 {
-  char store_value[8];
-  const char* base_path;
-  char name[64];
-
-  char query[128];
-  if (resolve_store_base(req, store_value, sizeof(store_value), &base_path) != ESP_OK ||
-      httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
-      httpd_query_key_value(query, "name", name, sizeof(name)) != ESP_OK ||
-      !file_name_is_valid(name))
+  char* text = cJSON_PrintUnformatted(obj);
+  if (text == NULL)
   {
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request parameters");
-    return ESP_FAIL;
+    return;
   }
+  httpd_ws_frame_t frame = {0};
+  frame.type = HTTPD_WS_TYPE_TEXT;
+  frame.payload = (uint8_t*)text;
+  frame.len = strlen(text);
+  httpd_ws_send_frame(req, &frame);
+  free(text);
+}
+
+static void send_error(httpd_req_t* req, const char* message)
+{
+  cJSON* obj = cJSON_CreateObject();
+  cJSON_AddStringToObject(obj, "type", "error");
+  cJSON_AddStringToObject(obj, "message", message);
+  send_json(req, obj);
+  cJSON_Delete(obj);
+}
+
+//-- Discards any in-flight upload; used both on abnormal close and when a
+//-- new upload_start overrides one that was never finished with upload_end.
+static void abort_upload(void)
+{
+  if (!s_upload.active)
+  {
+    return;
+  }
+  fclose(s_upload.file);
+  remove(s_upload.path);
+  memset(&s_upload, 0, sizeof(s_upload));
+}
+
+static void handle_msg_list(httpd_req_t* req, cJSON* msg)
+{
+  const char* base_path;
+  if (!resolve_store_base(msg, &base_path))
+  {
+    send_error(req, "Invalid or missing 'store'");
+    return;
+  }
+
+  cJSON* response = cJSON_CreateObject();
+  cJSON_AddStringToObject(response, "type", "files");
+  cJSON_AddStringToObject(response, "store",
+                          cJSON_GetObjectItemCaseSensitive(msg, "store")->valuestring);
+  cJSON_AddItemToObject(response, "files", build_files_json(base_path));
+  send_json(req, response);
+  cJSON_Delete(response);
+}
+
+static void handle_msg_delete(httpd_req_t* req, cJSON* msg)
+{
+  const char* base_path;
+  cJSON* name_item = cJSON_GetObjectItemCaseSensitive(msg, "name");
+  if (!resolve_store_base(msg, &base_path) || !cJSON_IsString(name_item) ||
+      !file_name_is_valid(name_item->valuestring))
+  {
+    send_error(req, "Invalid request parameters");
+    return;
+  }
+  const char* name = name_item->valuestring;
+
+  bool ok = false;
+  if (!is_protected_littlefs_file(base_path, name))
+  {
+    char full_path[320];
+    snprintf(full_path, sizeof(full_path), "%s/%s", base_path, name);
+    ok = (remove(full_path) == 0);
+    if (ok)
+    {
+      ESP_LOGI(TAG, "Deleted %s from %s", name, base_path);
+    }
+  }
+
+  cJSON* response = cJSON_CreateObject();
+  cJSON_AddStringToObject(response, "type", "delete_ack");
+  cJSON_AddStringToObject(response, "name", name);
+  cJSON_AddBoolToObject(response, "ok", ok);
+  send_json(req, response);
+  cJSON_Delete(response);
+}
+
+static void handle_msg_download(httpd_req_t* req, cJSON* msg)
+{
+  const char* base_path;
+  cJSON* name_item = cJSON_GetObjectItemCaseSensitive(msg, "name");
+  if (!resolve_store_base(msg, &base_path) || !cJSON_IsString(name_item) ||
+      !file_name_is_valid(name_item->valuestring))
+  {
+    send_error(req, "Invalid request parameters");
+    return;
+  }
+  const char* name = name_item->valuestring;
 
   char full_path[320];
   snprintf(full_path, sizeof(full_path), "%s/%s", base_path, name);
 
+  struct stat file_stat;
+  if (stat(full_path, &file_stat) != 0)
+  {
+    send_error(req, "File not found");
+    return;
+  }
+
   FILE* file = fopen(full_path, "rb");
   if (file == NULL)
   {
-    httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
-    return ESP_FAIL;
+    send_error(req, "File not found");
+    return;
   }
 
-  char disposition[96];
-  snprintf(disposition, sizeof(disposition), "attachment; filename=\"%s\"", name);
-  httpd_resp_set_type(req, "application/octet-stream");
-  httpd_resp_set_hdr(req, "Content-Disposition", disposition);
+  cJSON* start = cJSON_CreateObject();
+  cJSON_AddStringToObject(start, "type", "download_start");
+  cJSON_AddStringToObject(start, "name", name);
+  cJSON_AddNumberToObject(start, "size", (double)file_stat.st_size);
+  send_json(req, start);
+  cJSON_Delete(start);
 
-  char buffer[512];
+  char buffer[WEBSERVER_WS_CHUNK_SIZE];
   size_t read_bytes;
-  esp_err_t result = ESP_OK;
-  while ((read_bytes = fread(buffer, 1, sizeof(buffer), file)) > 0)
+  bool failed = false;
+  while (!failed && (read_bytes = fread(buffer, 1, sizeof(buffer), file)) > 0)
   {
-    if (httpd_resp_send_chunk(req, buffer, read_bytes) != ESP_OK)
+    httpd_ws_frame_t frame = {0};
+    frame.type = HTTPD_WS_TYPE_BINARY;
+    frame.payload = (uint8_t*)buffer;
+    frame.len = read_bytes;
+    if (httpd_ws_send_frame(req, &frame) != ESP_OK)
     {
-      result = ESP_FAIL;
-      break;
+      failed = true;
     }
   }
   fclose(file);
 
-  if (result == ESP_OK)
+  cJSON* end = cJSON_CreateObject();
+  if (failed)
   {
-    httpd_resp_send_chunk(req, NULL, 0);
+    cJSON_AddStringToObject(end, "type", "error");
+    cJSON_AddStringToObject(end, "message", "Download interrupted");
   }
-  return result;
+  else
+  {
+    cJSON_AddStringToObject(end, "type", "download_end");
+    cJSON_AddStringToObject(end, "name", name);
+  }
+  send_json(req, end);
+  cJSON_Delete(end);
 }
 
-static esp_err_t handle_upload(httpd_req_t* req)
+static void handle_msg_upload_start(httpd_req_t* req, cJSON* msg)
 {
-  char store_value[8];
   const char* base_path;
-  char name[64];
-
-  char query[128];
-  if (resolve_store_base(req, store_value, sizeof(store_value), &base_path) != ESP_OK ||
-      httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
-      httpd_query_key_value(query, "name", name, sizeof(name)) != ESP_OK ||
-      !file_name_is_valid(name))
+  cJSON* name_item = cJSON_GetObjectItemCaseSensitive(msg, "name");
+  if (!resolve_store_base(msg, &base_path) || !cJSON_IsString(name_item) ||
+      !file_name_is_valid(name_item->valuestring))
   {
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request parameters");
-    return ESP_FAIL;
+    send_error(req, "Invalid request parameters");
+    return;
   }
+  const char* name = name_item->valuestring;
+
+  if (is_protected_littlefs_file(base_path, name))
+  {
+    send_error(req, "This file cannot be replaced");
+    return;
+  }
+
+  //-- Only one client (and therefore one upload) can ever be active; drop any
+  //-- previous upload that was never finished with upload_end.
+  abort_upload();
 
   char full_path[320];
   snprintf(full_path, sizeof(full_path), "%s/%s", base_path, name);
@@ -357,85 +492,205 @@ static esp_err_t handle_upload(httpd_req_t* req)
   FILE* file = fopen(full_path, "wb");
   if (file == NULL)
   {
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to create file");
-    return ESP_FAIL;
+    send_error(req, "Unable to create file");
+    return;
   }
 
-  char buffer[512];
-  int remaining = req->content_len;
-  while (remaining > 0)
+  s_upload.active = true;
+  s_upload.fd = httpd_req_to_sockfd(req);
+  s_upload.file = file;
+  snprintf(s_upload.path, sizeof(s_upload.path), "%s", full_path);
+  snprintf(s_upload.name, sizeof(s_upload.name), "%s", name);
+}
+
+static void handle_msg_upload_end(httpd_req_t* req, cJSON* msg)
+{
+  (void)msg;
+  bool ok = false;
+  char name[64] = "";
+  if (s_upload.active && s_upload.fd == httpd_req_to_sockfd(req))
   {
-    int to_read = remaining < (int)sizeof(buffer) ? remaining : (int)sizeof(buffer);
-    int received = httpd_req_recv(req, buffer, to_read);
-    if (received <= 0)
-    {
-      fclose(file);
-      remove(full_path);
-      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Upload aborted");
-      return ESP_FAIL;
-    }
-    fwrite(buffer, 1, received, file);
-    remaining -= received;
+    fclose(s_upload.file);
+    snprintf(name, sizeof(name), "%s", s_upload.name);
+    ESP_LOGI(TAG, "Uploaded %s to %s", s_upload.name, s_upload.path);
+    ok = true;
+    memset(&s_upload, 0, sizeof(s_upload));
   }
-  fclose(file);
 
-  ESP_LOGI(TAG, "Uploaded %s to %s (%d bytes)", name, base_path, req->content_len);
-  httpd_resp_sendstr(req, "OK");
+  cJSON* response = cJSON_CreateObject();
+  cJSON_AddStringToObject(response, "type", "upload_ack");
+  cJSON_AddStringToObject(response, "name", name);
+  cJSON_AddBoolToObject(response, "ok", ok);
+  send_json(req, response);
+  cJSON_Delete(response);
+}
+
+static void dispatch_binary_message(httpd_req_t* req, const uint8_t* data, size_t len)
+{
+  if (!s_upload.active || s_upload.fd != httpd_req_to_sockfd(req))
+  {
+    ESP_LOGW(TAG, "Ignoring unexpected binary frame (%u bytes)", (unsigned)len);
+    return;
+  }
+  if (len > 0)
+  {
+    fwrite(data, 1, len, s_upload.file);
+  }
+}
+
+static void dispatch_text_message(httpd_req_t* req, const char* data, size_t len)
+{
+  cJSON* msg = cJSON_ParseWithLength(data, len);
+  if (msg == NULL)
+  {
+    send_error(req, "Invalid JSON message");
+    return;
+  }
+
+  cJSON* type_item = cJSON_GetObjectItemCaseSensitive(msg, "type");
+  const char* type = cJSON_IsString(type_item) ? type_item->valuestring : "";
+
+  if (strcmp(type, "list") == 0)
+  {
+    handle_msg_list(req, msg);
+  }
+  else if (strcmp(type, "delete") == 0)
+  {
+    handle_msg_delete(req, msg);
+  }
+  else if (strcmp(type, "download") == 0)
+  {
+    handle_msg_download(req, msg);
+  }
+  else if (strcmp(type, "upload_start") == 0)
+  {
+    handle_msg_upload_start(req, msg);
+  }
+  else if (strcmp(type, "upload_end") == 0)
+  {
+    handle_msg_upload_end(req, msg);
+  }
+  else
+  {
+    send_error(req, "Unknown message type");
+  }
+
+  cJSON_Delete(msg);
+}
+
+//-- Runs in the httpd task shortly after being queued from handle_ws_connect();
+//-- notifies the previous client that it has been replaced, then closes it.
+static void async_notify_takeover(void* arg)
+{
+  int fd = (int)(intptr_t)arg;
+  static const char* payload = "{\"type\":\"taken_over\"}";
+  httpd_ws_frame_t frame = {0};
+  frame.type = HTTPD_WS_TYPE_TEXT;
+  frame.payload = (uint8_t*)payload;
+  frame.len = strlen(payload);
+  httpd_ws_send_frame_async(s_ws_server, fd, &frame);
+  httpd_sess_trigger_close(s_ws_server, fd);
+}
+
+static esp_err_t handle_ws_connect(httpd_req_t* req)
+{
+  int fd = httpd_req_to_sockfd(req);
+  char ip[46];
+  format_peer_ip(fd, ip, sizeof(ip));
+
+  if (s_active_fd >= 0 && s_active_fd != fd)
+  {
+    ESP_LOGI(TAG, "%s taken over by %s (fd %d -> %d)", s_active_ip, ip, s_active_fd, fd);
+    httpd_queue_work(s_ws_server, async_notify_takeover, (void*)(intptr_t)s_active_fd);
+  }
+  else
+  {
+    ESP_LOGI(TAG, "%s connected (fd=%d)", ip, fd);
+  }
+  s_active_fd = fd;
+  snprintf(s_active_ip, sizeof(s_active_ip), "%s", ip);
+
+  cJSON* hello = cJSON_CreateObject();
+  cJSON_AddStringToObject(hello, "type", "hello");
+  send_json(req, hello);
+  cJSON_Delete(hello);
   return ESP_OK;
 }
 
-static esp_err_t handle_delete(httpd_req_t* req)
+static esp_err_t ws_handler(httpd_req_t* req)
 {
-  char store_value[8];
-  const char* base_path;
-  char name[64];
-
-  char query[128];
-  if (resolve_store_base(req, store_value, sizeof(store_value), &base_path) != ESP_OK ||
-      httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
-      httpd_query_key_value(query, "name", name, sizeof(name)) != ESP_OK ||
-      !file_name_is_valid(name))
+  if (req->method == HTTP_GET)
   {
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request parameters");
-    return ESP_FAIL;
+    return handle_ws_connect(req);
   }
 
-  if (is_protected_littlefs_file(base_path, name))
+  httpd_ws_frame_t ws_pkt = {0};
+  ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+  esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
+  if (ret != ESP_OK)
   {
-    httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "This file cannot be deleted");
-    return ESP_FAIL;
+    ESP_LOGW(TAG, "httpd_ws_recv_frame failed to get frame len: %s", esp_err_to_name(ret));
+    return ret;
   }
 
-  char full_path[320];
-  snprintf(full_path, sizeof(full_path), "%s/%s", base_path, name);
-
-  if (remove(full_path) != 0)
+  uint8_t* buf = NULL;
+  if (ws_pkt.len)
   {
-    httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
-    return ESP_FAIL;
+    buf = calloc(1, ws_pkt.len + 1);
+    if (buf == NULL)
+    {
+      return ESP_ERR_NO_MEM;
+    }
+    ws_pkt.payload = buf;
+    ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
+    if (ret != ESP_OK)
+    {
+      ESP_LOGW(TAG, "httpd_ws_recv_frame failed: %s", esp_err_to_name(ret));
+      free(buf);
+      return ret;
+    }
   }
 
-  ESP_LOGI(TAG, "Deleted %s from %s", name, base_path);
-  httpd_resp_sendstr(req, "OK");
+  if (ws_pkt.type == HTTPD_WS_TYPE_TEXT)
+  {
+    dispatch_text_message(req, (const char*)buf, ws_pkt.len);
+  }
+  else if (ws_pkt.type == HTTPD_WS_TYPE_BINARY)
+  {
+    dispatch_binary_message(req, buf, ws_pkt.len);
+  }
+
+  free(buf);
   return ESP_OK;
 }
 
 esp_err_t webserver_api_register(httpd_handle_t server)
 {
-  httpd_uri_t list_uri = {.uri = "/api/files", .method = HTTP_GET, .handler = handle_list};
-  httpd_uri_t download_uri = {
-      .uri = "/api/download", .method = HTTP_GET, .handler = handle_download};
-  httpd_uri_t upload_uri = {.uri = "/api/upload", .method = HTTP_POST, .handler = handle_upload};
-  httpd_uri_t delete_uri = {.uri = "/api/delete", .method = HTTP_DELETE, .handler = handle_delete};
+  s_ws_server = server;
+  s_active_fd = -1;
+  s_active_ip[0] = '\0';
+  memset(&s_upload, 0, sizeof(s_upload));
 
-  esp_err_t err;
-  if ((err = httpd_register_uri_handler(server, &list_uri)) != ESP_OK)
-    return err;
-  if ((err = httpd_register_uri_handler(server, &download_uri)) != ESP_OK)
-    return err;
-  if ((err = httpd_register_uri_handler(server, &upload_uri)) != ESP_OK)
-    return err;
-  if ((err = httpd_register_uri_handler(server, &delete_uri)) != ESP_OK)
-    return err;
-  return ESP_OK;
+  httpd_uri_t ws_uri = {
+      .uri = "/ws",
+      .method = HTTP_GET,
+      .handler = ws_handler,
+      .is_websocket = true,
+  };
+  return httpd_register_uri_handler(server, &ws_uri);
+}
+
+void webserver_ws_on_session_close(httpd_handle_t hd, int sockfd)
+{
+  (void)hd;
+  if (sockfd == s_active_fd)
+  {
+    ESP_LOGI(TAG, "%s disconnected (fd=%d)", s_active_ip, sockfd);
+    s_active_fd = -1;
+    s_active_ip[0] = '\0';
+  }
+  if (s_upload.active && s_upload.fd == sockfd)
+  {
+    abort_upload();
+  }
 }

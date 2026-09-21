@@ -226,3 +226,35 @@ td:first-child {
   margin-top: 1em;
   min-height: 1.2em;
 }
+
+.ws-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.ws-modal {
+  background: var(--card-bg);
+  border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+  padding: 1.6em 2em;
+  max-width: 360px;
+  width: 90%;
+  text-align: left;
+}
+
+.ws-modal h2 {
+  margin: 0 0 1.2em;
+  font-size: 1.1em;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ws-modal .btn {
+  display: block;
+  margin-left: auto;
+}

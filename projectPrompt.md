@@ -545,15 +545,34 @@ The webserver started from `[Start Webserver]` serves a browser-based file manag
 
 The GUI uses a macOS-style light appearance (title bar with traffic-light dots, segmented control, rounded card table, San Francisco system font stack). Do not revert this to the previous plain dark theme without an explicit request.
 
-REST API, implemented in `components/webserver/webserver_api.c`:
+The GUI is WebSocket-based, implemented in `components/webserver/webserver_api.c`. Static assets (`index.html`, `style.css`, `app.js`) are still served over plain HTTP GET by `components/webserver/webserver_static.c`; all file-manager actions (list/upload/download/delete) and connection presence go over a single `/ws` WebSocket endpoint. This requires `CONFIG_HTTPD_WS_SUPPORT=y` (set in `sdkconfig.defaults`).
 
-- `GET /api/files?store=<sd|fs>`: lists files in the SD card (`/sdcard`) or LittleFS (`WEBSERVER_LITTLEFS_MOUNT_POINT`) store. Response items are sorted newest-first by filename (descending string compare), not by filesystem modification time, because FAT `st_mtime` is unreliable on this device (no NTP/RTC sync from GPS). This sort order relies on the fixed zero-padded `trip-EEYYMMDD-HHmmSS` naming.
-- For SD-card `.gpx` trip files, each list item also includes `distance_m` and `avg_speed_kmh`, read directly from the GPX trackpoints by the webserver API. `distance_m` is the last cumulative `<distance_m>` value; `avg_speed_kmh` is the final cumulative distance divided by the elapsed time between the first and last GPX `<time>` values. The matching CSV file must not be used for these GUI fields. These fields are omitted when trip data isn't available (e.g. non-trip files, malformed GPX files, or on the LittleFS store).
-- `GET /api/download?store=<sd|fs>&name=<file>`: streams a file for download.
-- `POST /api/upload?store=<sd|fs>&name=<file>`: uploads a file's raw body to the store.
-- `DELETE /api/delete?store=<sd|fs>&name=<file>`: deletes a file. The LittleFS files `style.css`, `index.html`, and `app.js` can never be deleted because the GUI itself depends on them: the server rejects this with `403 Forbidden`, and the client also renders their `[Delete]` button visibly disabled (grayed out) instead of hiding it.
+Only one WebSocket client may ever be the active client (tracked as `s_active_fd`):
+
+- On a new `/ws` handshake, if a different client is already active, the server sends it `{"type":"taken_over"}` (via `httpd_queue_work()` + `httpd_ws_send_frame_async()`, since the notification runs outside the new client's own request context) and force-closes its session with `httpd_sess_trigger_close()`. The new client becomes active and receives `{"type":"hello"}`.
+- `webserver_ws_on_session_close()`, wired into `httpd_config_t.close_fn` in `webserver.c`, clears the active-client state (and aborts any in-flight upload) on any disconnect, normal or abnormal, so a client that merely drops its connection is not left "active" forever.
+- Connect, takeover, and disconnect are each logged with the peer IP address (via `getpeername()`/`inet_ntop()` in `format_peer_ip()`), e.g. `"<ip> connected (fd=N)"`, `"<ip> taken over by <ip2> (fd X -> Y)"`, `"<ip> disconnected (fd=N)"`.
+- The GUI client (`app.js`) shows a modal overlay with a `[Reconnect]` button whenever its socket receives `{"type":"taken_over"}` or the socket closes for any other reason; `[Reconnect]` simply opens a new WebSocket connection.
+
+JSON message protocol over the WebSocket (client -> server unless noted):
+
+- `{"type":"list","store":"sd"|"fs"}` -> server replies `{"type":"files","store":...,"files":[...]}`. Each file item has `name` and `size`; SD-card `.gpx` trip files also include `distance_m` and `avg_speed_kmh`, read directly from the GPX trackpoints (`distance_m` is the last cumulative `<distance_m>` value; `avg_speed_kmh` is the final cumulative distance divided by the elapsed time between the first and last GPX `<time>` values). The matching CSV file must not be used for these GUI fields. Fields are omitted when trip data isn't available (e.g. non-trip files, malformed GPX files, or the LittleFS store). Files are sorted newest-first by filename (descending string compare), not filesystem modification time, because FAT `st_mtime` is unreliable on this device (no NTP/RTC sync from GPS); this relies on the fixed zero-padded `trip-EEYYMMDD-HHmmSS` naming.
+- `{"type":"delete","store":...,"name":...}` -> server replies `{"type":"delete_ack","name":...,"ok":true|false}`. The LittleFS files `style.css`, `index.html`, and `app.js` can never be deleted because the GUI itself depends on them: the server reports `ok:false`, and the client also renders their `[Delete]` button visibly disabled (grayed out) instead of hiding it.
+- `{"type":"download","store":...,"name":...}` -> server replies `{"type":"download_start","name":...,"size":...}`, then streams the file as a sequence of binary WebSocket frames, then `{"type":"download_end","name":...}` (or `{"type":"error",...}` if streaming failed partway through). The client assembles the binary frames into a `Blob` and triggers a normal browser download via a generated `<a download>` link.
+- `{"type":"upload_start","store":...,"name":...,"size":...}` followed by one or more binary WebSocket frames of raw file data, then `{"type":"upload_end"}` -> server replies `{"type":"upload_ack","name":...,"ok":true|false}`. Only one upload can ever be in flight, matching the single-active-client model; an upload that is never finished with `upload_end` (e.g. the client disconnects) is discarded and its partial file removed.
+- `{"type":"error","message":...}` is sent by the server for any invalid request (bad/missing `store`, invalid file name, protected file, I/O failure, unknown message type).
 
 In the file table, each row shows the file name, size, `[Download]` and `[Delete]` buttons (both real buttons, not links), and the trip's total distance and average speed when available. A `[Refresh]` button reloads the list on demand; the store toggle (SD card / LittleFS) and file uploads also refresh the list automatically after completing.
+
+### WebSocket Server Resource Limits
+
+The ESP-IDF httpd default configuration is not safe for a WebSocket-based GUI and must keep these adjustments in `components/webserver/webserver.c`'s `start_http_server()`:
+
+- `config.lru_purge_enable = true`: without this, once the httpd server's own socket pool (`max_open_sockets`) fills with lingering connections, it can no longer `accept()` any new connection at all (not even a fresh `/ws` reconnect); purging the least-recently-used session keeps it unstuck.
+- `config.max_open_sockets = 10`, paired with `CONFIG_LWIP_MAX_SOCKETS=16` in `sdkconfig.defaults` (the ESP-IDF default of 10 is the whole system's socket budget shared with mDNS/WiFi, not just the HTTP server's, and can be exhausted by a single page load — index.html, style.css, app.js, favicon.ico, plus the `/ws` upgrade — causing `accept()` to fail system-wide with errno 23/ENFILE and the server becoming completely unreachable).
+- Static asset responses (`webserver_static.c`) send `Connection: close` so a page load's HTTP requests don't linger under keep-alive and tie up sockets needed for the WebSocket.
+
+Do not lower these limits or revert to the ESP-IDF httpd defaults without re-validating on hardware; the symptoms of a regression are silent — the server simply stops accepting connections after some period of use, with `httpd_accept_conn: error in accept (23)` in the log.
 
 ## Validation
 
